@@ -131,3 +131,12 @@ class BoosterT1RoughEnvCfg(LocomotionVelocityRoughEnvCfg):
         self.commands.base_velocity.ranges.lin_vel_x = (-1.0, 1.0)
         self.commands.base_velocity.ranges.lin_vel_y = (-1.0, 1.0)
         self.commands.base_velocity.ranges.ang_vel_z = (-1.0, 1.0)
+
+        # --- Jumping modifications ---
+        self.commands.base_velocity.ranges.lin_vel_z = (0.0, 2.0)
+
+        self.rewards.feet_air_time.weight = 10.0
+        self.rewards.feet_air_time.params["threshold"] = 0.2
+
+        self.actions.joint_pos.scale = 0.5
+        self.rewards.feet_slide.weight = 0  # don't punish feet leaving ground
