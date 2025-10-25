@@ -936,3 +936,140 @@ def landing_orientation(
     reward = orientation_reward * any_foot_contact
 
     return reward
+
+
+def dual_foot_takeoff(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+) -> torch.Tensor:
+    """Reward taking off with both feet simultaneously.
+
+    Ensures proper bipedal jumping by verifying both feet were in contact
+    just before becoming airborne. Prevents single-leg hopping.
+
+    Args:
+        env: The learning environment.
+        sensor_cfg: Configuration for the contact sensor. Default: SceneEntityCfg("contact_forces").
+
+    Returns:
+        Reward tensor. Shape: (num_envs,).
+    """
+    # Get contact sensor
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+
+    # Get contact forces for all feet (shape: [num_envs, history_len, num_feet])
+    contact_forces = contact_sensor.data.net_forces_w_history[:, :, sensor_cfg.body_ids, 2]
+    contact_threshold = 1.0
+
+    # Current state: check if feet are in contact NOW
+    current_contacts = contact_forces[:, -1, :] > contact_threshold  # [num_envs, num_feet]
+    current_airborne = ~current_contacts.any(dim=1)  # [num_envs]
+
+    # Previous state: check if feet were in contact in previous step
+    if contact_forces.shape[1] > 1:
+        prev_contacts = contact_forces[:, -2, :] > contact_threshold  # [num_envs, num_feet]
+        prev_on_ground = prev_contacts.any(dim=1)  # [num_envs]
+        prev_both_feet_down = prev_contacts.all(dim=1)  # [num_envs]
+    else:
+        # First timestep, assume on ground
+        prev_on_ground = torch.ones(env.num_envs, dtype=torch.bool, device=env.device)
+        prev_both_feet_down = torch.ones(env.num_envs, dtype=torch.bool, device=env.device)
+
+    # Detect takeoff transition: was on ground, now airborne
+    takeoff_transition = prev_on_ground & current_airborne
+
+    # Reward only if BOTH feet were in contact before takeoff
+    proper_takeoff = takeoff_transition & prev_both_feet_down
+
+    return proper_takeoff.float()
+
+
+def dual_foot_landing(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    time_window: float = 0.1,
+) -> torch.Tensor:
+    """Reward landing with both feet within a short time window.
+
+    Ensures proper bipedal landing by checking that both feet make contact
+    within a specified time window. Prevents single-leg landings.
+
+    Args:
+        env: The learning environment.
+        sensor_cfg: Configuration for the contact sensor. Default: SceneEntityCfg("contact_forces").
+        time_window: Maximum time difference between feet landing in seconds. Default: 0.1s.
+
+    Returns:
+        Reward tensor. Shape: (num_envs,).
+    """
+    # Get contact sensor
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+
+    # Get contact forces for all feet
+    contact_forces = contact_sensor.data.net_forces_w_history[:, :, sensor_cfg.body_ids, 2]
+    contact_threshold = 1.0
+
+    # Current state: check which feet are in contact NOW
+    current_contacts = contact_forces[:, -1, :] > contact_threshold  # [num_envs, num_feet]
+    current_airborne = ~current_contacts.any(dim=1)  # [num_envs]
+
+    # Previous state
+    if contact_forces.shape[1] > 1:
+        prev_contacts = contact_forces[:, -2, :] > contact_threshold  # [num_envs, num_feet]
+        prev_airborne = ~prev_contacts.any(dim=1)  # [num_envs]
+    else:
+        prev_airborne = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+
+    # Detect landing transition: was airborne, now on ground
+    landing_transition = prev_airborne & ~current_airborne
+
+    # Initialize landing time tracker if not exists
+    if not hasattr(env, '_foot_landing_times'):
+        env._foot_landing_times = torch.full(
+            (env.num_envs, len(sensor_cfg.body_ids)),
+            -1.0,
+            device=env.device
+        )
+        env._landing_step_counter = 0
+
+    env._landing_step_counter += 1
+    current_time = env._landing_step_counter * env.step_dt
+
+    # Update landing times for feet that just touched down (VECTORIZED)
+    # Detect new contact for all feet at once
+    if contact_forces.shape[1] > 1:
+        # new_foot_contact shape: [num_envs, num_feet]
+        new_foot_contact = ~prev_contacts & current_contacts
+    else:
+        new_foot_contact = current_contacts
+
+    # Update landing times for all feet in one operation
+    # Where new contact detected, set to current_time, otherwise keep existing time
+    env._foot_landing_times = torch.where(
+        new_foot_contact,
+        torch.full_like(env._foot_landing_times, current_time),
+        env._foot_landing_times
+    )
+
+    # Reset landing times when airborne (all feet at once)
+    env._foot_landing_times[current_airborne] = -1.0
+
+    # Check if both feet have landed recently (within time window)
+    both_feet_landed = (env._foot_landing_times > 0).all(dim=1)  # [num_envs]
+
+    # Calculate time difference between first and last foot landing
+    time_diff = torch.zeros(env.num_envs, device=env.device)
+    valid_mask = both_feet_landed
+
+    if valid_mask.any():
+        min_times = env._foot_landing_times[valid_mask].min(dim=1)[0]
+        max_times = env._foot_landing_times[valid_mask].max(dim=1)[0]
+        time_diff[valid_mask] = max_times - min_times
+
+    # Reward if both feet landed within the time window
+    synchronized_landing = both_feet_landed & (time_diff < time_window)
+
+    # Only reward during the landing transition to avoid giving reward every step
+    reward = landing_transition & synchronized_landing
+
+    return reward.float()

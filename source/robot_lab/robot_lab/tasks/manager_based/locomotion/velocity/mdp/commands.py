@@ -217,27 +217,81 @@ class JumpTargetCommand(CommandTerm):
     def _resample_command(self, env_ids: Sequence[int]):
         """Resample jump target positions for the given environments.
 
+        This method supports curriculum learning with per-environment stage assignments.
+        If curriculum stages are assigned, each environment samples from its assigned stage's ranges.
+        Otherwise, it falls back to the global horizontal_range and height_range.
+
         Args:
             env_ids: Environment indices for which to resample commands.
         """
         # Get current robot positions for the resampling environments
         robot_pos_w = self.robot.data.root_pos_w[env_ids].clone()
 
-        # Sample random angles for target direction (full 360 degrees)
-        theta = torch.empty(len(env_ids), device=self.device).uniform_(-torch.pi, torch.pi)
-
-        # Sample horizontal distance from curriculum range
-        horizontal_dist = torch.empty(len(env_ids), device=self.device).uniform_(
-            self.horizontal_range[0], self.horizontal_range[1]
+        # Extract robot's current yaw angle from quaternion (x, y, z, w format)
+        robot_quat = self.robot.data.root_quat_w[env_ids]
+        robot_yaw = torch.atan2(
+            2.0 * (robot_quat[:, 3] * robot_quat[:, 2] + robot_quat[:, 0] * robot_quat[:, 1]),
+            1.0 - 2.0 * (robot_quat[:, 1]**2 + robot_quat[:, 2]**2)
         )
+
+        # Sample relative angle within ±40 degrees from robot's forward direction
+        relative_angle = torch.empty(len(env_ids), device=self.device).uniform_(
+            -0.6981,  # -40 degrees in radians
+            0.6981    # +40 degrees in radians
+        )
+
+        # Combine robot yaw with relative angle for world-frame target direction
+        theta = robot_yaw + relative_angle
+
+        # Check if curriculum stages are assigned (for anti-forgetting curriculum)
+        if hasattr(self, '_stage_assignments') and hasattr(self, '_curriculum_stages'):
+            # Per-environment sampling from assigned curriculum stages (VECTORIZED)
+
+            # Get stage indices for all environments being reset
+            stage_indices = self._stage_assignments[env_ids]  # [len(env_ids)]
+
+            # Pre-compute stage ranges as tensors if not already done
+            if not hasattr(self, '_stage_h_min_tensor'):
+                # Extract all stage ranges into tensors for fast indexing
+                self._stage_h_min_tensor = torch.tensor(
+                    [s['horizontal_range'][0] for s in self._curriculum_stages],
+                    device=self.device
+                )
+                self._stage_h_max_tensor = torch.tensor(
+                    [s['horizontal_range'][1] for s in self._curriculum_stages],
+                    device=self.device
+                )
+                self._stage_z_min_tensor = torch.tensor(
+                    [s['height_range'][0] for s in self._curriculum_stages],
+                    device=self.device
+                )
+                self._stage_z_max_tensor = torch.tensor(
+                    [s['height_range'][1] for s in self._curriculum_stages],
+                    device=self.device
+                )
+
+            # Gather min/max values for assigned stages (vectorized lookup)
+            h_min = self._stage_h_min_tensor[stage_indices]  # [len(env_ids)]
+            h_max = self._stage_h_max_tensor[stage_indices]  # [len(env_ids)]
+            z_min = self._stage_z_min_tensor[stage_indices]  # [len(env_ids)]
+            z_max = self._stage_z_max_tensor[stage_indices]  # [len(env_ids)]
+
+            # Sample from ranges (vectorized uniform sampling)
+            horizontal_dist = h_min + (h_max - h_min) * torch.rand(len(env_ids), device=self.device)
+            target_height = z_min + (z_max - z_min) * torch.rand(len(env_ids), device=self.device)
+
+        else:
+            # Fallback: sample from global ranges (backward compatibility)
+            horizontal_dist = torch.empty(len(env_ids), device=self.device).uniform_(
+                self.horizontal_range[0], self.horizontal_range[1]
+            )
+            target_height = torch.empty(len(env_ids), device=self.device).uniform_(
+                self.height_range[0], self.height_range[1]
+            )
+
         # Ensure minimum distance to prevent spawning inside humanoid
         min_distance = 0.5  # Minimum 0.5m to avoid spawning inside robot
         horizontal_dist = torch.clamp(horizontal_dist, min=min_distance)
-
-        # Sample height from curriculum range
-        target_height = torch.empty(len(env_ids), device=self.device).uniform_(
-            self.height_range[0], self.height_range[1]
-        )
 
         # Calculate target position in world frame
         self.target_pos_w[env_ids, 0] = robot_pos_w[:, 0] + horizontal_dist * torch.cos(theta)

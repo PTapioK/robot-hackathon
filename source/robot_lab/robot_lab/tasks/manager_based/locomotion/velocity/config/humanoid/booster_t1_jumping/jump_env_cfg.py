@@ -5,14 +5,18 @@
 Booster T1 Jumping Navigation Environment Configuration
 
 This environment trains the Booster T1 humanoid robot to jump to target landing zones
-with curriculum learning that progressively increases jump distance and height differences.
+with an anti-forgetting curriculum learning system that prevents catastrophic forgetting.
 
 Key Features:
 - Jump target command system for position-based navigation
-- Progressive curriculum from 0.3m to 1.5m jump distances
-- Height variation support (elevated platforms and lowered areas)
+- 20-stage anti-forgetting curriculum from 0.3m to 3.0m jump distances
+- Height variation from -1.5m to +1.5m (superhuman performance targets)
+- Multi-stage sampling: trains on ALL unlocked stages simultaneously
+- Adaptive progression: advances at >70% success, regresses at ≤30% success
+- Dual-foot takeoff and landing enforcement for proper bipedal mechanics
 - Reduced torque penalties to enable explosive jumping movements
 - Jump-specific observations and rewards
+- Per-stage performance tracking and detailed logging
 """
 
 import robot_lab.tasks.manager_based.locomotion.velocity.mdp as mdp
@@ -64,8 +68,9 @@ class BoosterT1JumpEnvCfg(LocomotionVelocityRoughEnvCfg):
             asset_name="robot",
             resampling_time_range=(10.0, 15.0),  # Resample target every 10-15 seconds
             debug_vis=True,  # Enable target visualization
-            horizontal_range=(0.3, 0.5),  # Stage 1: short jumps
-            height_range=(-0.05, 0.05),  # Stage 1: level jumps
+            # Initial ranges (Stage 0) - will be dynamically updated by curriculum
+            horizontal_range=(0.3, 0.4),  # Stage 0: very short jumps
+            height_range=(-0.03, 0.03),  # Stage 0: nearly level jumps
             success_radius=0.3,  # 30cm tolerance for landing
         )
 
@@ -172,6 +177,23 @@ class BoosterT1JumpEnvCfg(LocomotionVelocityRoughEnvCfg):
             },
         )
 
+        self.rewards.dual_foot_takeoff = RewTerm(
+            func=mdp.dual_foot_takeoff,
+            weight=10.0,
+            params={
+                "sensor_cfg": SceneEntityCfg("contact_forces", body_names=[self.foot_link_name]),
+            },
+        )
+
+        self.rewards.dual_foot_landing = RewTerm(
+            func=mdp.dual_foot_landing,
+            weight=12.0,
+            params={
+                "sensor_cfg": SceneEntityCfg("contact_forces", body_names=[self.foot_link_name]),
+                "time_window": 0.1,  # Both feet must land within 0.1 seconds
+            },
+        )
+
         # --- MODIFIED REWARDS (Reduced penalties for jumping) ---
 
         # General penalties
@@ -244,17 +266,47 @@ class BoosterT1JumpEnvCfg(LocomotionVelocityRoughEnvCfg):
         # ======================================================================================
         self.terminations.illegal_contact.params["sensor_cfg"].body_names = [self.base_link_name]
 
+        # Add termination for excessive ground contacts (walking/hopping instead of clean jump)
+        # Allows max 2 contact phases: (1) initial stance, (2) landing
+        # If feet touch ground a 3rd time, episode terminates
+        from isaaclab.managers import TerminationTermCfg as DoneTerm
+        self.terminations.excessive_ground_contacts = DoneTerm(
+            func=mdp.excessive_ground_contacts,
+            params={
+                "sensor_cfg": SceneEntityCfg("contact_forces", body_names=[self.foot_link_name]),
+                "max_contact_phases": 2,  # Initial stance + landing only
+            },
+        )
+
+        # Add successful termination when landing perfectly on target
+        # Success criteria: within 10cm of target, all joints stable (vel < 0.1 rad/s), maintained for 0.5s
+        self.terminations.successful_landing = DoneTerm(
+            func=mdp.successful_landing,
+            time_out=True,  # This is a success termination, not a failure
+            params={
+                "command_name": "jump_target",
+                "sensor_cfg": SceneEntityCfg("contact_forces", body_names=[self.foot_link_name]),
+                "asset_cfg": SceneEntityCfg("robot"),
+                "position_tolerance": 0.1,   # Within 10cm of target
+                "velocity_threshold": 0.1,   # Joint velocities < 0.1 rad/s
+                "stability_time": 0.5,       # Maintain stability for 0.5 seconds
+            },
+        )
+
         # ======================================================================================
         # Curriculum Configuration
         # ======================================================================================
 
-        # Use jump-specific curriculum instead of velocity curriculum
+        # Use anti-forgetting jump curriculum with 10 stages
+        # This curriculum prevents catastrophic forgetting by sampling from all unlocked stages
         self.curriculum.jump_target_levels = CurrTerm(
             func=mdp.jump_target_curriculum,
             params={
                 "reward_term_name": "reach_target_zone",
                 "command_term_name": "jump_target",
-                "success_threshold": 0.7,
+                "success_threshold": 0.7,           # Progress to next stage at >70% success
+                "regression_threshold": 0.3,        # Regress to previous stage at ≤30% success
+                "rollouts_per_stage": 20,          # Collect 20 rollouts per unlocked stage before evaluation
             },
         )
 
