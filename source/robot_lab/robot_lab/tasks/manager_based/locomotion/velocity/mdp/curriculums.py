@@ -143,23 +143,28 @@ def jump_target_curriculum(
     # Initialize curriculum state on first call
     if not hasattr(env, '_jump_curriculum_level'):
         env._jump_curriculum_level = 0  # Current highest unlocked stage
-        env._jump_stage_rollouts = torch.zeros(len(CURRICULUM_STAGES), dtype=torch.int32, device=env.device)
-        env._jump_stage_successes = torch.zeros(len(CURRICULUM_STAGES), device=env.device)
         env._jump_current_stage_assignments = torch.zeros(env.num_envs, dtype=torch.int32, device=env.device)
         env._jump_evaluation_cycle = 0
-        env._jump_total_rollouts_this_cycle = 0
+        env._jump_iteration_counter = 0
+
+        # Rolling buffer to track last 20 rollouts per stage (efficient GPU tensors)
+        # Shape: [num_stages, 20] - stores success values (0.0 to 1.0)
+        env._jump_stage_history = torch.zeros(len(CURRICULUM_STAGES), 20, device=env.device)
+        # Track how many rollouts recorded per stage (for calculating averages)
+        env._jump_stage_count = torch.zeros(len(CURRICULUM_STAGES), dtype=torch.int32, device=env.device)
+        # Circular buffer index for each stage
+        env._jump_stage_idx = torch.zeros(len(CURRICULUM_STAGES), dtype=torch.int32, device=env.device)
 
         # Store configuration
         env._jump_rollouts_per_stage = rollouts_per_stage
         env._jump_success_threshold = success_threshold
         env._jump_regression_threshold = regression_threshold
 
-    # Only update curriculum at episode boundaries
+    # Update rolling buffers at episode boundaries (FAST - no sync)
     if len(env_ids) > 0 and env.common_step_counter % env.max_episode_length == 0:
         # Get success metrics from the reward manager
         episode_sums = env.reward_manager._episode_sums[reward_term_name]
 
-        # Update per-environment statistics (VECTORIZED)
         # Get stage indices for all resetting environments
         stage_indices = env._jump_current_stage_assignments[env_ids]  # [len(env_ids)]
 
@@ -167,96 +172,65 @@ def jump_target_curriculum(
         rewards = episode_sums[env_ids]  # [len(env_ids)]
         successes = rewards / env.max_episode_length_s  # [len(env_ids)]
 
-        # Accumulate rollout counts per stage using scatter_add
-        # This adds 1 to the bin corresponding to each environment's stage
-        env._jump_stage_rollouts.scatter_add_(
-            0,  # dim to scatter on
-            stage_indices.long(),  # indices
-            torch.ones_like(stage_indices, dtype=torch.int32)  # values to add
-        )
+        # Update rolling buffers (FULLY VECTORIZED - stays on GPU)
+        # Get unique stages and their counts
+        unique_stages = torch.unique(stage_indices)
 
-        # Accumulate success scores per stage using scatter_add
-        env._jump_stage_successes.scatter_add_(
-            0,  # dim to scatter on
-            stage_indices.long(),  # indices
-            successes  # values to add
-        )
+        for stage in unique_stages:
+            # Find all envs that completed this stage
+            mask = stage_indices == stage
+            stage_successes = successes[mask]
 
-        env._jump_total_rollouts_this_cycle += len(env_ids)
+            # Get current circular buffer index for this stage
+            start_idx = env._jump_stage_idx[stage]
 
-        # Calculate required rollouts for evaluation
+            # How many rollouts for this stage this iteration
+            n_rollouts = stage_successes.shape[0]
+
+            # Update circular buffer (handle wrapping)
+            for j in range(n_rollouts):
+                idx = (start_idx + j) % 20
+                env._jump_stage_history[stage, idx] = stage_successes[j]
+
+            # Update circular buffer index
+            env._jump_stage_idx[stage] = (start_idx + n_rollouts) % 20
+
+            # Track count (caps at 20 for rolling window)
+            env._jump_stage_count[stage] = torch.clamp(env._jump_stage_count[stage] + n_rollouts, max=20)
+
+        env._jump_iteration_counter += 1
+
+    # Evaluate curriculum every 10 iterations (EFFICIENT - minimal sync)
+    if env._jump_iteration_counter > 0 and env._jump_iteration_counter % 10 == 0:
         num_unlocked_stages = env._jump_curriculum_level + 1
-        required_rollouts = num_unlocked_stages * rollouts_per_stage
 
-        # Check if we've collected enough data for evaluation
-        if env._jump_total_rollouts_this_cycle >= required_rollouts:
-            # Calculate overall success rate across all unlocked stages
-            total_successes = torch.sum(env._jump_stage_successes[:num_unlocked_stages]).item()
-            total_rollouts = torch.sum(env._jump_stage_rollouts[:num_unlocked_stages]).item()
-            overall_success_rate = total_successes / max(total_rollouts, 1)
-
-            # Calculate per-stage success rates for logging
-            stage_success_rates = []
+        # Check if we have enough data (at least 5 rollouts per unlocked stage)
+        min_rollouts_needed = torch.min(env._jump_stage_count[:num_unlocked_stages])
+        if min_rollouts_needed >= 5:
+            # Calculate success rates from rolling buffers (ON GPU)
+            stage_success_rates_tensor = torch.zeros(num_unlocked_stages, device=env.device)
             for i in range(num_unlocked_stages):
-                stage_rollouts = env._jump_stage_rollouts[i].item()
-                if stage_rollouts > 0:
-                    stage_success_rates.append(
-                        env._jump_stage_successes[i].item() / stage_rollouts
-                    )
-                else:
-                    stage_success_rates.append(0.0)
+                count = env._jump_stage_count[i]
+                # Average over actual recorded values (up to 20)
+                stage_success_rates_tensor[i] = torch.mean(env._jump_stage_history[i, :count])
 
-            # Calculate current max ranges across all unlocked stages
-            max_horizontal_range = max(CURRICULUM_STAGES[i]['horizontal_range'][1] for i in range(num_unlocked_stages))
-            max_height_range = max(CURRICULUM_STAGES[i]['height_range'][1] for i in range(num_unlocked_stages))
-            min_height_range = min(CURRICULUM_STAGES[i]['height_range'][0] for i in range(num_unlocked_stages))
+            # Overall success rate is average across all unlocked stages
+            overall_success_rate = torch.mean(stage_success_rates_tensor).item()  # ONE sync point
 
-            print(f"\n{'='*80}")
-            print(f"JUMP CURRICULUM EVALUATION - Cycle {env._jump_evaluation_cycle}")
-            print(f"{'='*80}")
-            print(f"Overall Success Rate: {overall_success_rate:.2%}")
-            print(f"Current Stage: {env._jump_curriculum_level} (unlocked stages: 0-{env._jump_curriculum_level})")
-            print(f"Max Horizontal Distance: {max_horizontal_range:.2f}m")
-            print(f"Height Range: {min_height_range:.2f}m to +{max_height_range:.2f}m")
-            print(f"\nPer-Stage Performance:")
-            for i in range(num_unlocked_stages):
-                stage = CURRICULUM_STAGES[i]
-                rollouts = env._jump_stage_rollouts[i].item()
-                success_rate = stage_success_rates[i]
-                print(f"  Stage {i}: {success_rate:.2%} ({rollouts} rollouts) "
-                      f"- H: {stage['horizontal_range']}, Z: {stage['height_range']}")
-
-            # Decide on progression or regression
+            # Decide on progression or regression (ON GPU, minimal sync)
             old_level = env._jump_curriculum_level
 
+            # Progression/regression logic
             if overall_success_rate > success_threshold:
-                # Progress to next stage if not at max
                 if env._jump_curriculum_level < len(CURRICULUM_STAGES) - 1:
                     env._jump_curriculum_level += 1
-                    print(f"\n*** PROGRESSING to Stage {env._jump_curriculum_level} ***")
-                    print(f"    Success rate {overall_success_rate:.2%} > threshold {success_threshold:.2%}")
-                else:
-                    print(f"\n*** MASTERY ACHIEVED - Already at maximum stage {env._jump_curriculum_level} ***")
+                    print(f"[Curriculum] Stage {env._jump_curriculum_level} | Success: {overall_success_rate:.1%} ↑")
 
             elif overall_success_rate <= regression_threshold:
-                # Regress to previous stage if not at minimum
                 if env._jump_curriculum_level > 0:
                     env._jump_curriculum_level -= 1
-                    print(f"\n*** REGRESSING to Stage {env._jump_curriculum_level} ***")
-                    print(f"    Success rate {overall_success_rate:.2%} <= threshold {regression_threshold:.2%}")
-                else:
-                    print(f"\n*** NEEDS MORE TRAINING - Already at minimum stage {env._jump_curriculum_level} ***")
+                    print(f"[Curriculum] Stage {env._jump_curriculum_level} | Success: {overall_success_rate:.1%} ↓")
 
-            else:
-                print(f"\n*** MAINTAINING Stage {env._jump_curriculum_level} ***")
-                print(f"    Success rate {overall_success_rate:.2%} between thresholds")
-
-            print(f"{'='*80}\n")
-
-            # Reset counters for next evaluation cycle
-            env._jump_stage_rollouts.zero_()
-            env._jump_stage_successes.zero_()
-            env._jump_total_rollouts_this_cycle = 0
             env._jump_evaluation_cycle += 1
 
     # Assign stages to environments on reset (mixed sampling strategy)
