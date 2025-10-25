@@ -31,6 +31,7 @@ from robot_lab.tasks.manager_based.locomotion.velocity.velocity_env_cfg import (
 # Pre-defined configs
 ##
 from robot_lab.assets.booster import BOOSTER_T1_CFG  # isort: skip
+from isaaclab.terrains.config.rough import ROUGH_TERRAINS_CFG  # isort: skip
 
 
 @configclass
@@ -51,9 +52,9 @@ class BoosterT1JumpEnvCfg(LocomotionVelocityRoughEnvCfg):
         self.scene.height_scanner.prim_path = "{ENV_REGEX_NS}/Robot/" + self.base_link_name
         self.scene.height_scanner_base.prim_path = "{ENV_REGEX_NS}/Robot/" + self.base_link_name
 
-        # Use flat terrain for initial jump training
-        self.scene.terrain.terrain_type = "plane"
-        self.scene.terrain.terrain_generator = None
+        # Use rough terrain for jump training
+        self.scene.terrain.terrain_type = "generator"
+        self.scene.terrain.terrain_generator = ROUGH_TERRAINS_CFG
 
         # ======================================================================================
         # Commands Configuration - Replace velocity with jump targets
@@ -102,7 +103,7 @@ class BoosterT1JumpEnvCfg(LocomotionVelocityRoughEnvCfg):
         self.observations.policy.joint_pos.scale = 1.0
         self.observations.policy.joint_vel.scale = 0.05
         self.observations.policy.base_lin_vel = None  # Disable - not tracking velocity
-        self.observations.policy.height_scan = None  # Disable for flat terrain
+        # Keep height_scan enabled for rough terrain navigation
 
         # ======================================================================================
         # Actions Configuration

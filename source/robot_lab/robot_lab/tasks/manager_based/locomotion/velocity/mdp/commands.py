@@ -166,6 +166,8 @@ class JumpTargetCommand(CommandTerm):
         self.target_pos_b = torch.zeros_like(self.target_pos_w)
         # -- distance from robot to target (horizontal)
         self.target_distance = torch.zeros(self.num_envs, device=self.device)
+        # -- ground reference height for each environment (to prevent spawning in air)
+        self.ground_height = torch.zeros(self.num_envs, device=self.device)
 
         # Initialize curriculum ranges (can be updated by curriculum function)
         self.horizontal_range = torch.tensor(cfg.horizontal_range, device=self.device)
@@ -212,12 +214,21 @@ class JumpTargetCommand(CommandTerm):
         # Get current robot positions for the resampling environments
         robot_pos_w = self.robot.data.root_pos_w[env_ids].clone()
 
+        # Update ground reference height (robot's current Z when on ground)
+        # This prevents targets from spawning in the air
+        self.ground_height[env_ids] = robot_pos_w[:, 2]
+
         # Sample random angles for target direction (full 360 degrees)
         r = torch.empty(len(env_ids), device=self.device)
         theta = r.uniform_(-torch.pi, torch.pi)
 
         # Sample horizontal distance from curriculum range
-        horizontal_dist = r.uniform_(self.horizontal_range[0], self.horizontal_range[1])
+        # Ensure minimum distance to prevent spawning inside humanoid
+        min_distance = 0.5  # Minimum 0.5m to avoid spawning inside robot
+        horizontal_dist = r.uniform_(
+            max(self.horizontal_range[0], min_distance),
+            max(self.horizontal_range[1], min_distance)
+        )
 
         # Sample height from curriculum range
         target_height = r.uniform_(self.height_range[0], self.height_range[1])
@@ -225,7 +236,8 @@ class JumpTargetCommand(CommandTerm):
         # Calculate target position in world frame
         self.target_pos_w[env_ids, 0] = robot_pos_w[:, 0] + horizontal_dist * torch.cos(theta)
         self.target_pos_w[env_ids, 1] = robot_pos_w[:, 1] + horizontal_dist * torch.sin(theta)
-        self.target_pos_w[env_ids, 2] = robot_pos_w[:, 2] + target_height
+        # Use ground reference height instead of current robot Z (which could be mid-air)
+        self.target_pos_w[env_ids, 2] = self.ground_height[env_ids] + target_height
 
         # Store horizontal distance for metrics
         self.target_distance[env_ids] = horizontal_dist
