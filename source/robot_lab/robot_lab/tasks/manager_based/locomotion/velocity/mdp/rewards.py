@@ -873,6 +873,18 @@ def progress_to_target(
     # Velocity component toward target (dot product)
     progress_rate = (dir_xy * lin_vel_w[:, :2]).sum(dim=1)
 
+    # Stage-aware clamping: don't penalize moving away in early stages (0-1)
+    # Stage 0 (standing) and Stage 1 (crouch) allow natural swaying without penalty
+    # Stage 2+ (actual jumps) penalize moving away from target
+    if hasattr(env, '_jump_current_stage_assignments'):
+        stage = env._jump_current_stage_assignments
+        in_early_stage = stage <= 1
+        progress_rate = torch.where(
+            in_early_stage,
+            progress_rate.clamp(min=0.0),  # Only reward forward progress in Stage 0-1
+            progress_rate                   # Allow negative penalty in Stage 2+
+        )
+
     return progress_rate
 
 
