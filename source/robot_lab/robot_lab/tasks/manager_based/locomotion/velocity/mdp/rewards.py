@@ -957,6 +957,34 @@ def upright_on_landing(
     return reward
 
 
+def reward_airborne_time(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+) -> torch.Tensor:
+    """Reward for being airborne (both feet off ground).
+
+    Encourages jumping behavior by rewarding flight time.
+    Fires continuously while robot is in the air.
+
+    Args:
+        env: The learning environment.
+        sensor_cfg: Configuration for the contact sensor.
+
+    Returns:
+        Reward tensor (1.0 when airborne, 0.0 when grounded). Shape: (num_envs,).
+    """
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+
+    # Check contact for each foot
+    contact_forces = contact_sensor.data.net_forces_w_history[:, :, sensor_cfg.body_ids, 2].max(dim=1)[0]
+    feet_in_contact = contact_forces > 1.0
+
+    # Reward when NO feet in contact (fully airborne)
+    airborne = ~feet_in_contact.any(dim=1)
+
+    return airborne.float()
+
+
 # ==============================================================================
 # Jump-Specific Rewards (Legacy - Replaced by FSM-Based Above)
 # ==============================================================================

@@ -24,11 +24,12 @@ Curriculum Stages (20 total):
 - Stage 1-19: Progressive jumps from 0.4m to 3.0m with height variation
 - Removed standing/tiny jumps - robot learns jumping from the start
 
-Core Rewards (4 FSM-based):
-- Landing success (50.0) - one-time shaped reward on first landing
+Core Rewards (5 total):
+- Landing success (50.0) - one-time shaped reward on first landing (FSM)
 - Progress to target (5.0) - dense velocity-based progress (no history)
-- Pre-takeoff ground penalty (-2.0) - anti-walking (Stage 1+ only)
-- Upright landing bonus (8.0) - one-time orientation reward
+- Pre-takeoff ground penalty (-2.0) - anti-walking (all stages)
+- Upright landing bonus (8.0) - one-time orientation reward (FSM)
+- Airborne bonus (3.0) - continuous reward for being in the air
 
 Performance: ~180-220K steps/s with 16K environments on H100 (with rough terrain)
 FSM optimization: Reduced redundant contact sensor queries via state caching
@@ -141,9 +142,9 @@ class BoosterT1JumpEnvCfg(LocomotionVelocityRoughEnvCfg):
         # Rewards Configuration
         # ======================================================================================
 
-        # --- FSM-BASED JUMP REWARDS (Performance-Optimized ~180-220K steps/s) ---
-        # One-time landing rewards with FSM state tracking to reduce redundant sensor queries
-        # Key features: shaped landing rewards, dense velocity-based progress, anti-walking
+        # --- JUMP REWARDS (Performance-Optimized ~180-220K steps/s) ---
+        # FSM-based landing rewards + airborne bonus to encourage jumping
+        # Key features: shaped landing rewards, dense velocity-based progress, airborne bonus
 
         # 1. Landing Success - One-time shaped reward on first landing
         self.rewards.jump_landing_win = RewTerm(
@@ -184,6 +185,15 @@ class BoosterT1JumpEnvCfg(LocomotionVelocityRoughEnvCfg):
             params={
                 "sensor_cfg": SceneEntityCfg("contact_forces", body_names=[self.foot_link_name]),
                 "asset_cfg": SceneEntityCfg("robot"),
+            },
+        )
+
+        # 5. Airborne Bonus - Encourage jumping by rewarding flight time
+        self.rewards.airborne_bonus = RewTerm(
+            func=mdp.reward_airborne_time,
+            weight=3.0,  # Continuous reward while in the air
+            params={
+                "sensor_cfg": SceneEntityCfg("contact_forces", body_names=[self.foot_link_name]),
             },
         )
 
