@@ -2,10 +2,15 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-Booster T1 Jumping Navigation Environment Configuration - OPTIMIZED
+Booster T1 Jumping Navigation Environment Configuration - JUMP-ONLY
 
-This environment trains the Booster T1 humanoid robot to jump to target landing zones
-on rough terrain with high-performance curriculum learning.
+This environment trains the Booster T1 humanoid robot to jump (NOT walk) to target
+landing zones on rough terrain with high-performance curriculum learning.
+
+Anti-Walking Mechanisms:
+- Penalize horizontal movement while feet on ground (-5.0 weight)
+- Reward horizontal progress ONLY when airborne (+5.0 weight)
+- No ground-based approach rewards (disabled)
 
 Performance Optimizations:
 - NO height_scan raycasting (disabled - extremely expensive!)
@@ -14,14 +19,17 @@ Performance Optimizations:
 - Zero-overhead curriculum (fully vectorized GPU ops)
 - Aggressive PhysX GPU settings (655K patches, 384MB collision stack)
 
-Key Features:
-- Rough terrain navigation with procedural generation
-- Stage 0: Standing-only (no jumping) - learns stable two-legged stance
-- Jump target command system for position-based navigation
-- 21-stage curriculum from standing to 3.0m jump distances
-- Multi-stage sampling: trains on ALL unlocked stages simultaneously
-- Adaptive progression: advances at >50% success
-- 4 core rewards: landing accuracy, approach target, dual-foot landing, stability
+Curriculum Stages (22 total):
+- Stage 0: Standing (0m) - stable two-legged stance
+- Stage 1: Crouch & Takeoff (0-0.15m) - learn explosive jumping mechanics
+- Stage 2-21: Progressive jumps from 0.3m to 3.0m with height variation
+
+Core Rewards (5 total):
+- Landing accuracy (50.0) - reach target zone
+- Airborne progress (5.0) - horizontal movement while jumping
+- Dual-foot landing (10.0) - land with both feet
+- Landing stability (8.0) - upright landing
+- Anti-walking penalty (-5.0) - prevent ground movement
 
 Performance: ~150K steps/s with 16K environments on H100 (with rough terrain)
 """
@@ -134,7 +142,7 @@ class BoosterT1JumpEnvCfg(LocomotionVelocityRoughEnvCfg):
         # ======================================================================================
 
         # --- OPTIMIZED JUMP REWARDS (Balanced performance ~150K steps/s) ---
-        # Key rewards for landing accuracy, dual-foot mechanics, and stability
+        # Key rewards for landing accuracy, dual-foot mechanics, stability, and anti-walking
 
         # 1. Landing Accuracy - Large reward for landing near target
         self.rewards.reach_target_zone = RewTerm(
@@ -147,11 +155,15 @@ class BoosterT1JumpEnvCfg(LocomotionVelocityRoughEnvCfg):
             },
         )
 
-        # 2. Approach Target - Continuous reward for reducing distance
-        self.rewards.approach_target = RewTerm(
-            func=mdp.target_progress,
-            weight=2.0,  # Increased from 1.0 for stronger guidance
-            params={"command_name": "jump_target", "std": 1.0},
+        # 2. Airborne Progress - Reward horizontal progress ONLY when jumping
+        self.rewards.airborne_progress = RewTerm(
+            func=mdp.reward_airborne_progress,
+            weight=5.0,  # Strong reward for making progress while airborne
+            params={
+                "command_name": "jump_target",
+                "sensor_cfg": SceneEntityCfg("contact_forces", body_names=[self.foot_link_name]),
+                "asset_cfg": SceneEntityCfg("robot"),
+            },
         )
 
         # 3. Dual-Foot Landing - Encourage landing with both feet
@@ -173,6 +185,20 @@ class BoosterT1JumpEnvCfg(LocomotionVelocityRoughEnvCfg):
                 "asset_cfg": SceneEntityCfg("robot"),
             },
         )
+
+        # 5. ANTI-WALKING: Penalize horizontal movement while on ground
+        self.rewards.penalize_ground_movement = RewTerm(
+            func=mdp.penalize_ground_velocity,
+            weight=-5.0,  # Strong penalty to prevent walking
+            params={
+                "sensor_cfg": SceneEntityCfg("contact_forces", body_names=[self.foot_link_name]),
+                "asset_cfg": SceneEntityCfg("robot"),
+                "velocity_threshold": 0.05,  # Penalize movement > 5cm/s while on ground
+            },
+        )
+
+        # Disable ground-based approach reward (replaced with airborne progress)
+        self.rewards.approach_target = None
 
         # Disable less critical rewards (keep overhead low)
         self.rewards.flight_phase_quality = None

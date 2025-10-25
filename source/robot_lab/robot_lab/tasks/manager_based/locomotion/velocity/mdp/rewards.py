@@ -1073,3 +1073,111 @@ def dual_foot_landing(
     reward = landing_transition & synchronized_landing
 
     return reward.float()
+
+
+def penalize_ground_velocity(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    velocity_threshold: float = 0.05,
+) -> torch.Tensor:
+    """Penalize horizontal movement while feet are on the ground.
+
+    Prevents walking by applying penalty when robot moves horizontally with feet touching ground.
+    Encourages jumping as the only means of horizontal locomotion.
+
+    Args:
+        env: The learning environment.
+        sensor_cfg: Configuration for the contact sensor. Default: SceneEntityCfg("contact_forces").
+        asset_cfg: Configuration for the robot asset. Default: SceneEntityCfg("robot").
+        velocity_threshold: Minimum velocity to penalize (m/s). Default: 0.05m/s.
+
+    Returns:
+        Penalty tensor (negative values). Shape: (num_envs,).
+    """
+    # Get robot asset
+    asset: RigidObject = env.scene[asset_cfg.name]
+
+    # Get contact sensor
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+
+    # Check if feet are in contact with ground
+    contact_forces = contact_sensor.data.net_forces_w_history[:, :, sensor_cfg.body_ids, 2].max(dim=1)[0]
+    feet_in_contact = contact_forces > 1.0
+    any_foot_contact = feet_in_contact.any(dim=1)  # [num_envs]
+
+    # Get horizontal velocity magnitude
+    horizontal_vel = torch.norm(asset.data.root_lin_vel_b[:, :2], dim=1)  # [num_envs]
+
+    # Penalize if moving horizontally while on ground
+    # Only apply penalty above threshold to allow small adjustments
+    moving = horizontal_vel > velocity_threshold
+
+    # Penalty proportional to velocity (squared for stronger effect)
+    penalty = torch.where(
+        any_foot_contact & moving,
+        -horizontal_vel ** 2,
+        torch.zeros_like(horizontal_vel)
+    )
+
+    return penalty
+
+
+def reward_airborne_progress(
+    env: ManagerBasedRLEnv,
+    command_name: str = "jump_target",
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Reward horizontal progress toward target ONLY when airborne.
+
+    Ensures robot makes progress through jumping, not walking.
+
+    Args:
+        env: The learning environment.
+        command_name: Name of the jump target command. Default: "jump_target".
+        sensor_cfg: Configuration for the contact sensor. Default: SceneEntityCfg("contact_forces").
+        asset_cfg: Configuration for the robot asset. Default: SceneEntityCfg("robot").
+
+    Returns:
+        Reward tensor. Shape: (num_envs,).
+    """
+    # Get robot asset
+    asset: RigidObject = env.scene[asset_cfg.name]
+
+    # Get target position from command manager
+    jump_command = env.command_manager._terms[command_name]
+    target_pos_w = jump_command.target_pos_w
+
+    # Get contact sensor
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+
+    # Check if airborne (no feet in contact)
+    contact_forces = contact_sensor.data.net_forces_w_history[:, :, sensor_cfg.body_ids, 2].max(dim=1)[0]
+    feet_in_contact = contact_forces > 1.0
+    airborne = ~feet_in_contact.any(dim=1)  # [num_envs]
+
+    # Calculate horizontal distance to target
+    distance_to_target = torch.norm(
+        asset.data.root_pos_w[:, :2] - target_pos_w[:, :2],
+        dim=1
+    )
+
+    # Track previous distance if not initialized
+    if not hasattr(env, '_prev_distance_to_target'):
+        env._prev_distance_to_target = distance_to_target.clone()
+
+    # Calculate progress (reduction in distance)
+    distance_reduction = env._prev_distance_to_target - distance_to_target
+
+    # Only reward progress made while airborne
+    reward = torch.where(
+        airborne,
+        torch.clamp(distance_reduction, min=0.0) * 10.0,  # Scale up the reward
+        torch.zeros_like(distance_reduction)
+    )
+
+    # Update previous distance for next step
+    env._prev_distance_to_target = distance_to_target.clone()
+
+    return reward
