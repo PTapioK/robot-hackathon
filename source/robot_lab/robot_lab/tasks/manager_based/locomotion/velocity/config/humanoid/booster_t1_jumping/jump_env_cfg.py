@@ -327,8 +327,20 @@ class BoosterT1JumpEnvCfg(LocomotionVelocityRoughEnvCfg):
         self.episode_length_s = 15.0  # Longer episodes for jump execution
         self.decimation = 4
 
-        # Patch buffer: minimum 328,828 required, setting to 11 * 2^15 = 360,448
-        self.sim.physx.gpu_max_rigid_patch_count = 11 * 2**15
+        # ======================================================================================
+        # PhysX GPU Settings - Optimized for NVIDIA H100 80GB (Aggressive Throughput)
+        # ======================================================================================
+        # Patch buffer: ~655K patches for high parallel contact processing
+        self.sim.physx.gpu_max_rigid_patch_count = 20 * 2**15
 
-        # Collision stack: minimum 71,091,904 bytes required, setting to 80 MB for safety
-        self.sim.physx.gpu_collision_stack_size = 80 * 2**20
+        # Collision stack: 384 MB for large-scale collision detection
+        self.sim.physx.gpu_collision_stack_size = 384 * 2**20
+
+        # Heap capacity: 256 MB for dynamic allocations
+        self.sim.physx.gpu_heap_capacity = 256 * 2**20
+
+        # Temp buffer: 128 MB for intermediate physics calculations
+        self.sim.physx.gpu_temp_buffer_capacity = 128 * 2**20
+
+        # Collision pair tracking: 2M pairs for dynamic environments
+        self.sim.physx.gpu_found_lost_pairs_capacity = 2**21

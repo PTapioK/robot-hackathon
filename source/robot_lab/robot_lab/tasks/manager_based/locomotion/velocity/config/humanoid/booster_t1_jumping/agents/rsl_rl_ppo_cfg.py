@@ -7,7 +7,8 @@ from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticCfg, R
 
 @configclass
 class BoosterT1RoughPPORunnerCfg(RslRlOnPolicyRunnerCfg):
-    num_steps_per_env = 24
+    # Optimized for H100 80GB with high environment counts (16K+)
+    num_steps_per_env = 48  # Increased from 24: longer rollouts for better GPU utilization
     max_iterations = 3000
     save_interval = 50
     experiment_name = "booster_t1_rough"
@@ -24,7 +25,7 @@ class BoosterT1RoughPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         clip_param=0.2,
         entropy_coef=0.008,
         num_learning_epochs=5,
-        num_mini_batches=4,
+        num_mini_batches=16,  # Increased from 4: better batch size for H100 bandwidth
         learning_rate=1.0e-3,
         schedule="adaptive",
         gamma=0.99,
