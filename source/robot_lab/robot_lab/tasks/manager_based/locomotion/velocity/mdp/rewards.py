@@ -683,7 +683,277 @@ def flat_orientation_l2(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg = Scen
 
 
 # ==============================================================================
-# Jump-Specific Rewards
+# Jump-Specific Rewards (FSM-Based for Performance)
+# ==============================================================================
+
+# Global state buffers for jump FSM (per-device, per-env-count)
+_JUMP_STATE_BUFFERS = {}
+
+
+def _get_jump_state_bufs(device: torch.device, num_envs: int) -> dict:
+    """Get or create jump state buffers for finite state machine.
+
+    Buffers track jump phases per environment:
+    - air_prev: Was airborne in previous step?
+    - took_off: Has robot ever been airborne this episode?
+    - landed: Has robot completed first landing this episode?
+
+    Args:
+        device: Torch device for tensors.
+        num_envs: Number of parallel environments.
+
+    Returns:
+        Dictionary of state buffers.
+    """
+    key = (device, int(num_envs))
+    if key in _JUMP_STATE_BUFFERS:
+        return _JUMP_STATE_BUFFERS[key]
+
+    # Allocate buffers lazily on first access
+    bufs = {
+        "air_prev": torch.zeros(num_envs, dtype=torch.bool, device=device),
+        "took_off": torch.zeros(num_envs, dtype=torch.bool, device=device),
+        "landed": torch.zeros(num_envs, dtype=torch.bool, device=device),
+    }
+    _JUMP_STATE_BUFFERS[key] = bufs
+    return bufs
+
+
+def reset_jump_state_on_termination(
+    env: ManagerBasedRLEnv,
+    env_ids: torch.Tensor,
+) -> None:
+    """Reset jump FSM state buffers on episode termination.
+
+    Called automatically by environment on episode reset.
+
+    Args:
+        env: The learning environment.
+        env_ids: Indices of environments to reset.
+    """
+    bufs = _get_jump_state_bufs(env.device, env.num_envs)
+    bufs["air_prev"][env_ids] = False
+    bufs["took_off"][env_ids] = False
+    bufs["landed"][env_ids] = False
+
+
+def _any_foot_contact(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg,
+) -> torch.Tensor:
+    """Fast check if any foot is touching ground.
+
+    Args:
+        env: The learning environment.
+        sensor_cfg: Configuration for the contact sensor.
+
+    Returns:
+        Boolean tensor indicating any foot contact. Shape: (num_envs,).
+    """
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    # Check if any foot has significant force (> 1N threshold)
+    forces_z = contact_sensor.data.net_forces_w_history[:, :, sensor_cfg.body_ids, 2].max(dim=1)[0]
+    feet_in_contact = forces_z > 1.0
+    return feet_in_contact.any(dim=1)
+
+
+def _world_up_from_quat(quat: torch.Tensor) -> torch.Tensor:
+    """Extract upright component (cos of tilt angle) from quaternion.
+
+    Args:
+        quat: Quaternion tensor (w, x, y, z format). Shape: (num_envs, 4).
+
+    Returns:
+        Cosine of tilt angle (1.0 = perfectly upright). Shape: (num_envs,).
+    """
+    # Extract quaternion components (w, x, y, z)
+    w, x, y, z = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
+    # Z-axis component of rotation (upright = 1.0)
+    up_z = 1.0 - 2.0 * (x * x + y * y)
+    return up_z.clamp(-1.0, 1.0)
+
+
+def jump_landing_win(
+    env: ManagerBasedRLEnv,
+    command_name: str = "jump_target",
+    success_radius: float = 0.3,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """One-time landing reward with shaped falloff inside success radius.
+
+    Fires ONLY on the first landing step after takeoff. Shaped linearly
+    from 1.0 (at target center) to 0.0 (at success_radius edge).
+    Prevents reward exploitation from "dancing" on target zone.
+
+    Args:
+        env: The learning environment.
+        command_name: Name of the jump target command. Default: "jump_target".
+        success_radius: Radius for shaped reward in meters. Default: 0.3m.
+        sensor_cfg: Configuration for the contact sensor.
+        asset_cfg: Configuration for the robot asset.
+
+    Returns:
+        Reward tensor (0.0 most steps, shaped [0..1] on landing). Shape: (num_envs,).
+    """
+    bufs = _get_jump_state_bufs(env.device, env.num_envs)
+
+    # Get robot position
+    asset: RigidObject = env.scene[asset_cfg.name]
+    pos_w = asset.data.root_pos_w
+
+    # Get target position
+    jump_command = env.command_manager._terms[command_name]
+    target_w = jump_command.target_pos_w
+
+    # Calculate horizontal distance to target
+    err_xy = target_w[:, :2] - pos_w[:, :2]
+    dist = torch.linalg.norm(err_xy, dim=1)
+
+    # Check contact state
+    contact_now = _any_foot_contact(env, sensor_cfg)
+    air_now = ~contact_now
+
+    # FSM state transitions
+    just_took_off = air_now & ~bufs["air_prev"]
+    bufs["took_off"] |= just_took_off
+
+    just_landed = contact_now & bufs["air_prev"] & ~bufs["landed"]
+    bufs["landed"] |= just_landed
+
+    # Shaped reward: linear falloff inside success_radius
+    inside = dist <= success_radius
+    shaped = (1.0 - (dist / success_radius)).clamp(min=0.0)
+
+    # Pay reward ONLY on landing step
+    reward = torch.where(
+        just_landed,
+        torch.where(inside, shaped, torch.zeros_like(shaped)),
+        torch.zeros_like(dist)
+    )
+
+    # Update state for next step
+    bufs["air_prev"] = air_now
+
+    return reward
+
+
+def progress_to_target(
+    env: ManagerBasedRLEnv,
+    command_name: str = "jump_target",
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Dense progress reward based on velocity toward target.
+
+    Computes dot product of velocity with direction to target.
+    No history tracking needed - purely instantaneous.
+
+    Args:
+        env: The learning environment.
+        command_name: Name of the jump target command. Default: "jump_target".
+        asset_cfg: Configuration for the robot asset.
+
+    Returns:
+        Reward tensor (progress rate in m/s). Shape: (num_envs,).
+    """
+    # Get robot state
+    asset: RigidObject = env.scene[asset_cfg.name]
+    pos_w = asset.data.root_pos_w
+    lin_vel_w = asset.data.root_lin_vel_w
+
+    # Get target position
+    jump_command = env.command_manager._terms[command_name]
+    target_w = jump_command.target_pos_w
+
+    # Direction to target (normalized)
+    err_xy = target_w[:, :2] - pos_w[:, :2]
+    dist = torch.linalg.norm(err_xy, dim=1).clamp_min(1e-6)
+    dir_xy = err_xy / dist.unsqueeze(1)
+
+    # Velocity component toward target (dot product)
+    progress_rate = (dir_xy * lin_vel_w[:, :2]).sum(dim=1)
+
+    return progress_rate
+
+
+def pre_takeoff_ground_time(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    command_name: str = "jump_target",
+) -> torch.Tensor:
+    """Penalty for staying on ground before first takeoff.
+
+    Encourages robot to jump quickly rather than walking.
+    ONLY penalizes in Stage 1+ (not Stage 0 standing curriculum).
+
+    Args:
+        env: The learning environment.
+        sensor_cfg: Configuration for the contact sensor.
+        command_name: Name of the jump target command (for stage detection).
+
+    Returns:
+        Penalty tensor (1.0 = penalize, 0.0 = no penalty). Shape: (num_envs,).
+    """
+    bufs = _get_jump_state_bufs(env.device, env.num_envs)
+
+    # Check if on ground
+    contact_now = _any_foot_contact(env, sensor_cfg)
+
+    # Get current curriculum stage (Stage 0 = standing, no penalty)
+    if hasattr(env, '_jump_current_stage_assignments'):
+        stage = env._jump_current_stage_assignments
+    else:
+        # Fallback: assume all in Stage 1+ if curriculum not initialized
+        stage = torch.ones(env.num_envs, dtype=torch.long, device=env.device)
+
+    # Penalty condition: on ground AND haven't taken off yet AND not in Stage 0
+    cost = contact_now & (~bufs["took_off"]) & (stage > 0)
+
+    return cost.float()
+
+
+def upright_on_landing(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """One-time bonus for landing upright.
+
+    Rewards maintaining upright orientation on first landing.
+    Fires ONLY on the first landing step after takeoff.
+
+    Args:
+        env: The learning environment.
+        sensor_cfg: Configuration for the contact sensor.
+        asset_cfg: Configuration for the robot asset.
+
+    Returns:
+        Reward tensor (0.0 most steps, [0..1] on landing). Shape: (num_envs,).
+    """
+    bufs = _get_jump_state_bufs(env.device, env.num_envs)
+
+    # Get robot orientation
+    asset: RigidObject = env.scene[asset_cfg.name]
+    quat_w = asset.data.root_quat_w
+
+    # Check contact state
+    contact_now = _any_foot_contact(env, sensor_cfg)
+
+    # Detect first landing (same logic as jump_landing_win)
+    just_landed = contact_now & bufs["air_prev"] & ~bufs["landed"]
+
+    # Calculate upright bonus (1.0 = perfectly upright, 0.0 = horizontal/inverted)
+    up_z = _world_up_from_quat(quat_w)
+    bonus = up_z.clamp(min=0.0)
+
+    # Pay bonus ONLY on first landing step
+    reward = torch.where(just_landed, bonus, torch.zeros_like(bonus))
+
+    return reward
+
+
+# ==============================================================================
+# Jump-Specific Rewards (Legacy - Replaced by FSM-Based Above)
 # ==============================================================================
 
 
