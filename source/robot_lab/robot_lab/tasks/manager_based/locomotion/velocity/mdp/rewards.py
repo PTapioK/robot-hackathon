@@ -873,16 +873,15 @@ def progress_to_target(
     # Velocity component toward target (dot product)
     progress_rate = (dir_xy * lin_vel_w[:, :2]).sum(dim=1)
 
-    # Stage-aware clamping: don't penalize moving away in early stages (0-1)
-    # Stage 0 (standing) and Stage 1 (crouch) allow natural swaying without penalty
-    # Stage 2+ (actual jumps) penalize moving away from target
+    # Stage-aware clamping: gentler penalty in Stage 0 (0.3m jumps - still learning)
+    # Stage 1+ (0.4m+) penalize moving away from target
     if hasattr(env, '_jump_current_stage_assignments'):
         stage = env._jump_current_stage_assignments
-        in_early_stage = stage <= 1
+        in_first_stage = stage == 0
         progress_rate = torch.where(
-            in_early_stage,
-            progress_rate.clamp(min=0.0),  # Only reward forward progress in Stage 0-1
-            progress_rate                   # Allow negative penalty in Stage 2+
+            in_first_stage,
+            progress_rate.clamp(min=0.0),  # Don't penalize moving away in Stage 0
+            progress_rate                   # Full penalty in Stage 1+
         )
 
     return progress_rate
@@ -896,7 +895,7 @@ def pre_takeoff_ground_time(
     """Penalty for staying on ground before first takeoff.
 
     Encourages robot to jump quickly rather than walking.
-    ONLY penalizes in Stage 1+ (not Stage 0 standing curriculum).
+    Disabled in Stage 0 (0.3m jumps) to allow gentler learning start.
 
     Args:
         env: The learning environment.
@@ -911,14 +910,14 @@ def pre_takeoff_ground_time(
     # Check if on ground
     contact_now = _any_foot_contact(env, sensor_cfg)
 
-    # Get current curriculum stage (Stage 0 = standing, no penalty)
+    # Get current curriculum stage (Stage 0 = 0.3m beginner jumps, no penalty yet)
     if hasattr(env, '_jump_current_stage_assignments'):
         stage = env._jump_current_stage_assignments
     else:
         # Fallback: assume all in Stage 1+ if curriculum not initialized
         stage = torch.ones(env.num_envs, dtype=torch.long, device=env.device)
 
-    # Penalty condition: on ground AND haven't taken off yet AND not in Stage 0
+    # Penalty condition: on ground AND haven't taken off yet AND past Stage 0
     cost = contact_now & (~bufs["took_off"]) & (stage > 0)
 
     return cost.float()

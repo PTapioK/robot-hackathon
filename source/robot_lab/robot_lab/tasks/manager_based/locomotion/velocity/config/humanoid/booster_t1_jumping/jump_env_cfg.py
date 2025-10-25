@@ -8,8 +8,8 @@ This environment trains the Booster T1 humanoid robot to jump (NOT walk) to targ
 landing zones on rough terrain with high-performance curriculum learning.
 
 Anti-Walking Mechanisms:
-- Penalize horizontal movement while feet on ground (-5.0 weight)
-- Reward horizontal progress ONLY when airborne (+5.0 weight)
+- Pre-takeoff ground penalty (-2.0 weight) - discourages staying grounded
+- Dense velocity-based progress (+5.0 weight) - rewards forward movement
 - No ground-based approach rewards (disabled)
 
 Performance Optimizations:
@@ -19,10 +19,10 @@ Performance Optimizations:
 - Zero-overhead curriculum (fully vectorized GPU ops)
 - Aggressive PhysX GPU settings (655K patches, 384MB collision stack)
 
-Curriculum Stages (22 total):
-- Stage 0: Standing (0m) - stable two-legged stance
-- Stage 1: Crouch & Takeoff (0-0.15m) - learn explosive jumping mechanics
-- Stage 2-21: Progressive jumps from 0.3m to 3.0m with height variation
+Curriculum Stages (20 total):
+- Stage 0: Beginner jump (0.3-0.4m) - learn basic jumping mechanics
+- Stage 1-19: Progressive jumps from 0.4m to 3.0m with height variation
+- Removed standing/tiny jumps - robot learns jumping from the start
 
 Core Rewards (4 FSM-based):
 - Landing success (50.0) - one-time shaped reward on first landing
@@ -281,10 +281,10 @@ class BoosterT1JumpEnvCfg(LocomotionVelocityRoughEnvCfg):
         self.curriculum.jump_target_levels = CurrTerm(
             func=mdp.jump_target_curriculum,
             params={
-                "reward_term_name": "approach_target",  # Use our simple reward
+                "reward_term_name": "jump_landing_win",  # Use FSM-based landing reward
                 "command_term_name": "jump_target",
-                "success_threshold": 0.5,        # Lower threshold for simpler reward
-                "regression_threshold": 0.2,
+                "success_threshold": 0.5,        # Advance when 50% success rate
+                "regression_threshold": 0.2,     # Regress if below 20%
                 "rollouts_per_stage": 10,
             },
         )
@@ -299,6 +299,21 @@ class BoosterT1JumpEnvCfg(LocomotionVelocityRoughEnvCfg):
         self.events.randomize_rigid_body_mass.params["asset_cfg"].body_names = [self.base_link_name]
         self.events.randomize_com_positions.params["asset_cfg"].body_names = [self.base_link_name]
         self.events.randomize_apply_external_force_torque.params["asset_cfg"].body_names = [self.base_link_name]
+
+        # Reduce reset randomization for early training stability
+        # Random velocities were causing immediate falls in Stage 0
+        self.events.randomize_reset_base.params["velocity_range"] = {
+            "x": (-0.1, 0.1),    # Reduced from (-0.5, 0.5)
+            "y": (-0.1, 0.1),    # Reduced from (-0.5, 0.5)
+            "z": (-0.1, 0.1),    # Reduced from (-0.5, 0.5)
+            "roll": (-0.1, 0.1),  # Reduced from (-0.5, 0.5)
+            "pitch": (-0.1, 0.1), # Reduced from (-0.5, 0.5)
+            "yaw": (-0.1, 0.1),   # Reduced from (-0.5, 0.5)
+        }
+
+        # Disable external forces on reset (too destabilizing for early training)
+        self.events.randomize_apply_external_force_torque.params["force_range"] = (0.0, 0.0)
+        self.events.randomize_apply_external_force_torque.params["torque_range"] = (0.0, 0.0)
 
         # FSM state reset on episode termination (critical for FSM-based rewards)
         from isaaclab.managers import EventTermCfg as EventTerm

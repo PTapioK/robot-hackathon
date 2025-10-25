@@ -81,33 +81,32 @@ def jump_target_curriculum(
         - Minimal CPU-GPU synchronization
 
     Key Features:
-        - 21 curriculum stages: Stage 0 (standing) + 20 jump stages
+        - 20 curriculum stages starting from 0.3m jumps
         - Samples equally from all unlocked stages (stage 0 to current_stage)
-        - Progresses when success rate > 60% across ALL unlocked stages
-        - Regresses when success rate <= 25% to prevent overstepping
+        - Progresses when success rate > 50% across ALL unlocked stages
+        - Regresses when success rate <= 20% to prevent overstepping
 
-    Curriculum Stages (21 total):
-        - Stage 0:  STANDING ONLY - no jump, focus on stable two-legged stance
-        - Stage 1:  0.30-0.40m horizontal, ±0.03m height (beginner jump)
-        - Stage 2:  0.40-0.50m horizontal, ±0.05m height (beginner)
-        - Stage 3:  0.50-0.60m horizontal, ±0.08m height (beginner+)
-        - Stage 4:  0.60-0.70m horizontal, ±0.12m height (novice)
-        - Stage 5:  0.70-0.85m horizontal, ±0.16m height (novice+)
-        - Stage 6:  0.85-1.00m horizontal, ±0.22m height (intermediate)
-        - Stage 7:  1.00-1.15m horizontal, ±0.28m height (intermediate+)
-        - Stage 8:  1.15-1.30m horizontal, ±0.35m height (advanced)
-        - Stage 9:  1.30-1.45m horizontal, ±0.43m height (advanced+)
-        - Stage 10: 1.45-1.60m horizontal, ±0.52m height (skilled)
-        - Stage 11: 1.60-1.75m horizontal, ±0.62m height (skilled+)
-        - Stage 12: 1.75-1.90m horizontal, ±0.73m height (expert)
-        - Stage 13: 1.90-2.05m horizontal, ±0.85m height (expert+)
-        - Stage 14: 2.05-2.20m horizontal, ±0.98m height (master)
-        - Stage 15: 2.20-2.35m horizontal, ±1.12m height (master+)
-        - Stage 16: 2.35-2.50m horizontal, ±1.20m height (elite)
-        - Stage 17: 2.50-2.65m horizontal, ±1.30m height (elite+)
-        - Stage 18: 2.65-2.80m horizontal, ±1.40m height (superhuman)
-        - Stage 19: 2.80-2.90m horizontal, ±1.45m height (superhuman+)
-        - Stage 20: 2.90-3.00m horizontal, ±1.50m height (legendary)
+    Curriculum Stages (20 total):
+        - Stage 0:  0.30-0.40m horizontal, ±0.03m height (beginner jump)
+        - Stage 1:  0.40-0.50m horizontal, ±0.05m height (beginner)
+        - Stage 2:  0.50-0.60m horizontal, ±0.08m height (beginner+)
+        - Stage 3:  0.60-0.70m horizontal, ±0.12m height (novice)
+        - Stage 4:  0.70-0.85m horizontal, ±0.16m height (novice+)
+        - Stage 5:  0.85-1.00m horizontal, ±0.22m height (intermediate)
+        - Stage 6:  1.00-1.15m horizontal, ±0.28m height (intermediate+)
+        - Stage 7:  1.15-1.30m horizontal, ±0.35m height (advanced)
+        - Stage 8:  1.30-1.45m horizontal, ±0.43m height (advanced+)
+        - Stage 9:  1.45-1.60m horizontal, ±0.52m height (skilled)
+        - Stage 10: 1.60-1.75m horizontal, ±0.62m height (skilled+)
+        - Stage 11: 1.75-1.90m horizontal, ±0.73m height (expert)
+        - Stage 12: 1.90-2.05m horizontal, ±0.85m height (expert+)
+        - Stage 13: 2.05-2.20m horizontal, ±0.98m height (master)
+        - Stage 14: 2.20-2.35m horizontal, ±1.12m height (master+)
+        - Stage 15: 2.35-2.50m horizontal, ±1.20m height (elite)
+        - Stage 16: 2.50-2.65m horizontal, ±1.30m height (elite+)
+        - Stage 17: 2.65-2.80m horizontal, ±1.40m height (superhuman)
+        - Stage 18: 2.80-2.90m horizontal, ±1.45m height (superhuman+)
+        - Stage 19: 2.90-3.00m horizontal, ±1.50m height (legendary)
 
     Args:
         env: The learning environment.
@@ -121,33 +120,30 @@ def jump_target_curriculum(
     Returns:
         Current curriculum level tensor.
     """
-    # Define 21 curriculum stages with gradual progression to superhuman performance
-    # Stage 0: STANDING - stable two-legged stance
-    # Stage 1: CROUCH & TAKEOFF - learn explosive jumping mechanics (minimal horizontal distance)
-    # Stage 2+: Progressive jump distances
+    # Define 20 curriculum stages starting from 0.3m jumps
+    # Removed Stage 0 (standing) and Stage 1 (0-0.15m) - too small for FSM rewards
+    # Robot learns jumping mechanics from the start at 0.3m distance
     CURRICULUM_STAGES = [
-        {"horizontal_range": (0.0, 0.0), "height_range": (0.0, 0.0)},         # Stage 0:  Standing only
-        {"horizontal_range": (0.0, 0.15), "height_range": (0.0, 0.0)},       # Stage 1:  Crouch & takeoff (vertical jump)
-        {"horizontal_range": (0.30, 0.40), "height_range": (-0.03, 0.03)},   # Stage 2:  Beginner jump
-        {"horizontal_range": (0.40, 0.50), "height_range": (-0.05, 0.05)},   # Stage 3:  Beginner
-        {"horizontal_range": (0.50, 0.60), "height_range": (-0.08, 0.08)},   # Stage 4:  Beginner+
-        {"horizontal_range": (0.60, 0.70), "height_range": (-0.12, 0.12)},   # Stage 5:  Novice
-        {"horizontal_range": (0.70, 0.85), "height_range": (-0.16, 0.16)},   # Stage 6:  Novice+
-        {"horizontal_range": (0.85, 1.00), "height_range": (-0.22, 0.22)},   # Stage 7:  Intermediate
-        {"horizontal_range": (1.00, 1.15), "height_range": (-0.28, 0.28)},   # Stage 8:  Intermediate+
-        {"horizontal_range": (1.15, 1.30), "height_range": (-0.35, 0.35)},   # Stage 9:  Advanced
-        {"horizontal_range": (1.30, 1.45), "height_range": (-0.43, 0.43)},   # Stage 10: Advanced+
-        {"horizontal_range": (1.45, 1.60), "height_range": (-0.52, 0.52)},   # Stage 11: Skilled
-        {"horizontal_range": (1.60, 1.75), "height_range": (-0.62, 0.62)},   # Stage 12: Skilled+
-        {"horizontal_range": (1.75, 1.90), "height_range": (-0.73, 0.73)},   # Stage 13: Expert
-        {"horizontal_range": (1.90, 2.05), "height_range": (-0.85, 0.85)},   # Stage 14: Expert+
-        {"horizontal_range": (2.05, 2.20), "height_range": (-0.98, 0.98)},   # Stage 15: Master
-        {"horizontal_range": (2.20, 2.35), "height_range": (-1.12, 1.12)},   # Stage 16: Master+
-        {"horizontal_range": (2.35, 2.50), "height_range": (-1.20, 1.20)},   # Stage 17: Elite
-        {"horizontal_range": (2.50, 2.65), "height_range": (-1.30, 1.30)},   # Stage 18: Elite+
-        {"horizontal_range": (2.65, 2.80), "height_range": (-1.40, 1.40)},   # Stage 19: Superhuman
-        {"horizontal_range": (2.80, 2.90), "height_range": (-1.45, 1.45)},   # Stage 20: Superhuman+
-        {"horizontal_range": (2.90, 3.00), "height_range": (-1.50, 1.50)},   # Stage 21: Legendary
+        {"horizontal_range": (0.30, 0.40), "height_range": (-0.03, 0.03)},   # Stage 0:  Beginner jump (was Stage 2)
+        {"horizontal_range": (0.40, 0.50), "height_range": (-0.05, 0.05)},   # Stage 1:  Beginner
+        {"horizontal_range": (0.50, 0.60), "height_range": (-0.08, 0.08)},   # Stage 2:  Beginner+
+        {"horizontal_range": (0.60, 0.70), "height_range": (-0.12, 0.12)},   # Stage 3:  Novice
+        {"horizontal_range": (0.70, 0.85), "height_range": (-0.16, 0.16)},   # Stage 4:  Novice+
+        {"horizontal_range": (0.85, 1.00), "height_range": (-0.22, 0.22)},   # Stage 5:  Intermediate
+        {"horizontal_range": (1.00, 1.15), "height_range": (-0.28, 0.28)},   # Stage 6:  Intermediate+
+        {"horizontal_range": (1.15, 1.30), "height_range": (-0.35, 0.35)},   # Stage 7:  Advanced
+        {"horizontal_range": (1.30, 1.45), "height_range": (-0.43, 0.43)},   # Stage 8:  Advanced+
+        {"horizontal_range": (1.45, 1.60), "height_range": (-0.52, 0.52)},   # Stage 9:  Skilled
+        {"horizontal_range": (1.60, 1.75), "height_range": (-0.62, 0.62)},   # Stage 10: Skilled+
+        {"horizontal_range": (1.75, 1.90), "height_range": (-0.73, 0.73)},   # Stage 11: Expert
+        {"horizontal_range": (1.90, 2.05), "height_range": (-0.85, 0.85)},   # Stage 12: Expert+
+        {"horizontal_range": (2.05, 2.20), "height_range": (-0.98, 0.98)},   # Stage 13: Master
+        {"horizontal_range": (2.20, 2.35), "height_range": (-1.12, 1.12)},   # Stage 14: Master+
+        {"horizontal_range": (2.35, 2.50), "height_range": (-1.20, 1.20)},   # Stage 15: Elite
+        {"horizontal_range": (2.50, 2.65), "height_range": (-1.30, 1.30)},   # Stage 16: Elite+
+        {"horizontal_range": (2.65, 2.80), "height_range": (-1.40, 1.40)},   # Stage 17: Superhuman
+        {"horizontal_range": (2.80, 2.90), "height_range": (-1.45, 1.45)},   # Stage 18: Superhuman+
+        {"horizontal_range": (2.90, 3.00), "height_range": (-1.50, 1.50)},   # Stage 19: Legendary
     ]
 
     # Initialize curriculum state on first call (PRE-COMPUTE EVERYTHING)
