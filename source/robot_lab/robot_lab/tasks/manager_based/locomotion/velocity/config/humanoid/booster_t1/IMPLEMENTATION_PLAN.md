@@ -320,16 +320,16 @@ decimation = 4
 ## Implementation Order
 
 1. ✓ Create this documentation file
-2. Create `JumpTargetCommand` class with visualization
-3. Add observation functions (`target_position_rel`, etc.)
-4. Implement jump-specific reward functions
-5. Create `jump_target_curriculum` function
-6. Build `jump_env_cfg.py` environment config
-7. Test with single fixed jump distance (disable curriculum)
-8. Verify observations and rewards are working correctly
-9. Enable curriculum and train stage 1
-10. Progressively train through all curriculum stages
-11. Evaluate performance and iterate on reward weights
+2. ✓ Create `JumpTargetCommand` class with visualization
+3. ✓ Add observation functions (`target_position_rel`, etc.)
+4. ✓ Implement jump-specific reward functions
+5. ✓ Create `jump_target_curriculum` function
+6. ✓ Build `jump_env_cfg.py` environment config
+7. TODO: Test with single fixed jump distance (disable curriculum)
+8. TODO: Verify observations and rewards are working correctly
+9. TODO: Enable curriculum and train stage 1
+10. TODO: Progressively train through all curriculum stages
+11. TODO: Evaluate performance and iterate on reward weights
 
 ---
 

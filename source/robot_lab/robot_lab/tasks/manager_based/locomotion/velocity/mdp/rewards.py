@@ -680,3 +680,259 @@ def flat_orientation_l2(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg = Scen
     reward = torch.sum(torch.square(asset.data.projected_gravity_b[:, :2]), dim=1)
     reward *= torch.clamp(-env.scene["robot"].data.projected_gravity_b[:, 2], 0, 0.7) / 0.7
     return reward
+
+
+# ==============================================================================
+# Jump-Specific Rewards
+# ==============================================================================
+
+
+def reach_target_zone(
+    env: ManagerBasedRLEnv,
+    command_name: str = "jump_target",
+    tolerance: float = 0.3,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+) -> torch.Tensor:
+    """Large positive reward for landing within target zone.
+
+    Uses exponential kernel to reward landing close to the target.
+    Only triggered when robot lands (feet make contact after flight).
+
+    Args:
+        env: The learning environment.
+        command_name: Name of the jump target command. Default: "jump_target".
+        tolerance: Success radius in meters. Default: 0.3m.
+        sensor_cfg: Configuration for the contact sensor. Default: SceneEntityCfg("contact_forces").
+
+    Returns:
+        Reward tensor. Shape: (num_envs,).
+    """
+    # Get robot asset
+    asset: RigidObject = env.scene["robot"]
+
+    # Get target position from command manager
+    jump_command = env.command_manager._terms[command_name]
+    target_pos_w = jump_command.target_pos_w
+
+    # Calculate horizontal distance to target
+    distance_to_target = torch.norm(
+        asset.data.root_pos_w[:, :2] - target_pos_w[:, :2],
+        dim=1
+    )
+
+    # Exponential kernel reward based on distance
+    reward = torch.exp(-distance_to_target**2 / tolerance**2)
+
+    # Only reward when feet are in contact (landing phase)
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    feet_in_contact = contact_sensor.data.net_forces_w_history[:, :, sensor_cfg.body_ids, 2].max(dim=1)[0] > 1.0
+    any_foot_contact = feet_in_contact.any(dim=1).float()
+
+    reward = reward * any_foot_contact
+
+    return reward
+
+
+def target_progress(
+    env: ManagerBasedRLEnv,
+    command_name: str = "jump_target",
+    std: float = 0.5,
+) -> torch.Tensor:
+    """Shaped reward for reducing horizontal distance to target.
+
+    Tracks distance reduction over time to guide robot toward target.
+
+    Args:
+        env: The learning environment.
+        command_name: Name of the jump target command. Default: "jump_target".
+        std: Standard deviation for exponential kernel. Default: 0.5.
+
+    Returns:
+        Reward tensor. Shape: (num_envs,).
+    """
+    # Get robot asset
+    asset: RigidObject = env.scene["robot"]
+
+    # Get target position from command manager
+    jump_command = env.command_manager._terms[command_name]
+    target_pos_w = jump_command.target_pos_w
+
+    # Calculate current horizontal distance to target
+    current_distance = torch.norm(
+        asset.data.root_pos_w[:, :2] - target_pos_w[:, :2],
+        dim=1
+    )
+
+    # Store previous distance (initialize if needed)
+    if not hasattr(env, '_prev_target_distance'):
+        env._prev_target_distance = current_distance.clone()
+
+    # Calculate progress (reduction in distance)
+    progress = env._prev_target_distance - current_distance
+
+    # Update previous distance for next step
+    env._prev_target_distance = current_distance.clone()
+
+    # Shaped reward based on progress
+    reward = progress / std
+
+    return reward
+
+
+def flight_phase_quality(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    min_height: float = 0.1,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Reward proper takeoff with both feet leaving ground.
+
+    Provides bonus for achieving minimum flight height.
+
+    Args:
+        env: The learning environment.
+        sensor_cfg: Configuration for the contact sensor. Default: SceneEntityCfg("contact_forces").
+        min_height: Minimum flight height for bonus reward in meters. Default: 0.1m.
+        asset_cfg: Configuration for the robot asset. Default: SceneEntityCfg("robot").
+
+    Returns:
+        Reward tensor. Shape: (num_envs,).
+    """
+    # Get contact sensor
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+
+    # Check if all feet are off the ground (airborne)
+    contact_forces = contact_sensor.data.net_forces_w_history[:, :, sensor_cfg.body_ids, 2].max(dim=1)[0]
+    contact_threshold = 1.0
+    feet_in_contact = contact_forces > contact_threshold
+    airborne = ~feet_in_contact.any(dim=1)
+
+    # Get robot height (Z velocity as proxy for flight quality)
+    asset: RigidObject = env.scene[asset_cfg.name]
+    vertical_velocity = asset.data.root_lin_vel_w[:, 2]
+
+    # Reward being airborne
+    reward = airborne.float()
+
+    # Bonus for upward velocity during flight
+    reward += torch.clamp(vertical_velocity, min=0.0, max=min_height * 10.0)
+
+    return reward
+
+
+def landing_stability(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Reward stable landing with low angular velocity and upright orientation.
+
+    Only applies during landing phase (when feet make contact).
+
+    Args:
+        env: The learning environment.
+        sensor_cfg: Configuration for the contact sensor. Default: SceneEntityCfg("contact_forces").
+        asset_cfg: Configuration for the robot asset. Default: SceneEntityCfg("robot").
+
+    Returns:
+        Reward tensor. Shape: (num_envs,).
+    """
+    # Get robot asset
+    asset: RigidObject = env.scene[asset_cfg.name]
+
+    # Get contact sensor
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+
+    # Check if feet are in contact (landing phase)
+    contact_forces = contact_sensor.data.net_forces_w_history[:, :, sensor_cfg.body_ids, 2].max(dim=1)[0]
+    feet_in_contact = contact_forces > 1.0
+    any_foot_contact = feet_in_contact.any(dim=1).float()
+
+    # Reward low angular velocity (stable landing)
+    ang_vel_penalty = torch.sum(torch.square(asset.data.root_ang_vel_b[:, :2]), dim=1)
+    ang_vel_reward = torch.exp(-ang_vel_penalty)
+
+    # Reward upright orientation
+    orientation_reward = 1.0 - torch.sum(torch.square(asset.data.projected_gravity_b[:, :2]), dim=1)
+
+    # Combine rewards, only during landing
+    reward = (ang_vel_reward + orientation_reward) * any_foot_contact
+
+    return reward
+
+
+def smooth_flight_trajectory(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Penalize excessive rotation during flight phase.
+
+    Encourages controlled flight without tumbling.
+
+    Args:
+        env: The learning environment.
+        sensor_cfg: Configuration for the contact sensor. Default: SceneEntityCfg("contact_forces").
+        asset_cfg: Configuration for the robot asset. Default: SceneEntityCfg("robot").
+
+    Returns:
+        Penalty tensor (negative values). Shape: (num_envs,).
+    """
+    # Get robot asset
+    asset: RigidObject = env.scene[asset_cfg.name]
+
+    # Get contact sensor
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+
+    # Check if airborne
+    contact_forces = contact_sensor.data.net_forces_w_history[:, :, sensor_cfg.body_ids, 2].max(dim=1)[0]
+    feet_in_contact = contact_forces > 1.0
+    airborne = (~feet_in_contact.any(dim=1)).float()
+
+    # Penalize angular velocity during flight
+    ang_vel_magnitude = torch.norm(asset.data.root_ang_vel_b, dim=1)
+    penalty = ang_vel_magnitude * airborne
+
+    return penalty
+
+
+def landing_orientation(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    target_orientation: list[float] = [0, 0, 0, 1],
+) -> torch.Tensor:
+    """Reward landing with correct upright orientation.
+
+    Uses quaternion distance to measure orientation error.
+
+    Args:
+        env: The learning environment.
+        sensor_cfg: Configuration for the contact sensor. Default: SceneEntityCfg("contact_forces").
+        asset_cfg: Configuration for the robot asset. Default: SceneEntityCfg("robot").
+        target_orientation: Target quaternion [x, y, z, w]. Default: [0, 0, 0, 1] (upright).
+
+    Returns:
+        Reward tensor. Shape: (num_envs,).
+    """
+    # Get robot asset
+    asset: RigidObject = env.scene[asset_cfg.name]
+
+    # Get contact sensor
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+
+    # Check if feet are in contact (landing phase)
+    contact_forces = contact_sensor.data.net_forces_w_history[:, :, sensor_cfg.body_ids, 2].max(dim=1)[0]
+    feet_in_contact = contact_forces > 1.0
+    any_foot_contact = feet_in_contact.any(dim=1).float()
+
+    # Calculate orientation error (using projected gravity as simpler measure)
+    # Perfect upright = projected_gravity_b = [0, 0, -1]
+    # Error is when x and y components are non-zero
+    orientation_error = torch.sum(torch.square(asset.data.projected_gravity_b[:, :2]), dim=1)
+    orientation_reward = torch.exp(-orientation_error / 0.5**2)
+
+    # Only reward during landing
+    reward = orientation_reward * any_foot_contact
+
+    return reward

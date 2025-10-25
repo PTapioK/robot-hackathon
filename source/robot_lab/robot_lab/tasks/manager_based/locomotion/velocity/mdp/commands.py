@@ -4,10 +4,15 @@
 from __future__ import annotations
 
 import torch
+from dataclasses import MISSING
 from typing import TYPE_CHECKING, Sequence
 
+from isaaclab.assets import Articulation
 from isaaclab.managers import CommandTerm, CommandTermCfg
+from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
+from isaaclab.markers.config import CUBOID_MARKER_CFG
 from isaaclab.utils import configclass
+from isaaclab.utils.math import quat_from_euler_xyz
 
 import robot_lab.tasks.manager_based.locomotion.velocity.mdp as mdp
 
@@ -125,3 +130,168 @@ class DiscreteCommandControllerCfg(CommandTermCfg):
     List of available discrete commands, where each element is an integer.
     Example: [10, 20, 30, 40, 50]
     """
+
+
+class JumpTargetCommand(CommandTerm):
+    """Command generator that generates jump target positions with curriculum learning support.
+
+    This command generator samples 3D target positions (x, y, z) within configurable ranges
+    for training a humanoid robot to jump to target landing zones. It supports:
+    - Horizontal distance curriculum (progressive jump distance)
+    - Height variation (elevated platforms and lowered areas)
+    - Visual target markers for debugging
+    - Success-based resampling
+    """
+
+    cfg: "JumpTargetCommandCfg"
+    """Configuration for the command generator."""
+
+    def __init__(self, cfg: "JumpTargetCommandCfg", env: ManagerBasedEnv):
+        """Initialize the jump target command generator.
+
+        Args:
+            cfg: The configuration of the command generator.
+            env: The environment object.
+        """
+        # Initialize the base class
+        super().__init__(cfg, env)
+
+        # Obtain the robot asset
+        self.robot: Articulation = env.scene[cfg.asset_name]
+
+        # Create buffers to store the command
+        # -- target position in world frame: (x, y, z)
+        self.target_pos_w = torch.zeros(self.num_envs, 3, device=self.device)
+        # -- target position in robot base frame (updated each step)
+        self.target_pos_b = torch.zeros_like(self.target_pos_w)
+        # -- distance from robot to target (horizontal)
+        self.target_distance = torch.zeros(self.num_envs, device=self.device)
+
+        # Initialize curriculum ranges (can be updated by curriculum function)
+        self.horizontal_range = torch.tensor(cfg.horizontal_range, device=self.device)
+        self.height_range = torch.tensor(cfg.height_range, device=self.device)
+
+        # Metrics
+        self.metrics["success_rate"] = torch.zeros(self.num_envs, device=self.device)
+        self.metrics["landing_distance"] = torch.zeros(self.num_envs, device=self.device)
+
+    def __str__(self) -> str:
+        """Return a string representation of the command generator."""
+        msg = "JumpTargetCommand:\n"
+        msg += f"\tCommand dimension: {tuple(self.command.shape[1:])}\n"
+        msg += f"\tResampling time range: {self.cfg.resampling_time_range}\n"
+        msg += f"\tHorizontal range: {self.horizontal_range.cpu().tolist()}\n"
+        msg += f"\tHeight range: {self.height_range.cpu().tolist()}\n"
+        msg += f"\tSuccess radius: {self.cfg.success_radius}"
+        return msg
+
+    @property
+    def command(self) -> torch.Tensor:
+        """The desired jump target position in base frame. Shape is (num_envs, 3)."""
+        return self.target_pos_b
+
+    def _update_metrics(self):
+        """Update metrics for landing accuracy."""
+        # Calculate horizontal distance to target
+        distance_to_target = torch.norm(
+            self.robot.data.root_pos_w[:, :2] - self.target_pos_w[:, :2],
+            dim=1
+        )
+        self.metrics["landing_distance"] = distance_to_target
+
+        # Check if within success radius
+        success = distance_to_target < self.cfg.success_radius
+        self.metrics["success_rate"] = success.float()
+
+    def _resample_command(self, env_ids: Sequence[int]):
+        """Resample jump target positions for the given environments.
+
+        Args:
+            env_ids: Environment indices for which to resample commands.
+        """
+        # Get current robot positions for the resampling environments
+        robot_pos_w = self.robot.data.root_pos_w[env_ids].clone()
+
+        # Sample random angles for target direction (full 360 degrees)
+        r = torch.empty(len(env_ids), device=self.device)
+        theta = r.uniform_(-torch.pi, torch.pi)
+
+        # Sample horizontal distance from curriculum range
+        horizontal_dist = r.uniform_(self.horizontal_range[0], self.horizontal_range[1])
+
+        # Sample height from curriculum range
+        target_height = r.uniform_(self.height_range[0], self.height_range[1])
+
+        # Calculate target position in world frame
+        self.target_pos_w[env_ids, 0] = robot_pos_w[:, 0] + horizontal_dist * torch.cos(theta)
+        self.target_pos_w[env_ids, 1] = robot_pos_w[:, 1] + horizontal_dist * torch.sin(theta)
+        self.target_pos_w[env_ids, 2] = robot_pos_w[:, 2] + target_height
+
+        # Store horizontal distance for metrics
+        self.target_distance[env_ids] = horizontal_dist
+
+    def _update_command(self):
+        """Update target position in robot base frame."""
+        # Transform target position from world to robot base frame
+        from isaaclab.utils.math import quat_apply_inverse, yaw_quat
+
+        target_vec_w = self.target_pos_w - self.robot.data.root_pos_w[:, :3]
+        self.target_pos_b[:] = quat_apply_inverse(
+            yaw_quat(self.robot.data.root_quat_w),
+            target_vec_w
+        )
+
+    def _set_debug_vis_impl(self, debug_vis: bool):
+        """Set visualization markers for jump targets."""
+        if debug_vis:
+            # Create markers if necessary for the first time
+            if not hasattr(self, "target_visualizer"):
+                self.target_visualizer = VisualizationMarkers(self.cfg.target_visualizer_cfg)
+            # Set visibility to true
+            self.target_visualizer.set_visibility(True)
+        else:
+            if hasattr(self, "target_visualizer"):
+                self.target_visualizer.set_visibility(False)
+
+    def _debug_vis_callback(self, event):
+        """Update visualization markers with current target positions."""
+        # Check if robot is initialized
+        if not self.robot.is_initialized:
+            return
+
+        # Update target marker positions
+        # Create a flat orientation (no rotation)
+        zero_rot = torch.zeros(self.num_envs, device=self.device)
+        target_quat = quat_from_euler_xyz(zero_rot, zero_rot, zero_rot)
+
+        # Visualize the target
+        self.target_visualizer.visualize(
+            translations=self.target_pos_w,
+            orientations=target_quat
+        )
+
+
+@configclass
+class JumpTargetCommandCfg(CommandTermCfg):
+    """Configuration for the jump target command generator."""
+
+    class_type: type = JumpTargetCommand
+
+    asset_name: str = MISSING
+    """Name of the asset in the environment for which the commands are generated."""
+
+    horizontal_range: tuple[float, float] = (0.3, 0.5)
+    """Range for horizontal jump distance in meters. Default: (0.3, 0.5) for curriculum stage 1."""
+
+    height_range: tuple[float, float] = (-0.05, 0.05)
+    """Range for target height relative to starting position in meters.
+    Negative values = lowered areas, Positive values = elevated platforms.
+    Default: (-0.05, 0.05) for curriculum stage 1."""
+
+    success_radius: float = 0.3
+    """Radius tolerance for successful landing in meters. Default: 0.3m."""
+
+    target_visualizer_cfg: VisualizationMarkersCfg = CUBOID_MARKER_CFG.replace(
+        prim_path="/Visuals/Command/jump_target"
+    )
+    """Configuration for the target visualization marker. Shows landing zone as a flat box."""
