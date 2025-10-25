@@ -28,21 +28,6 @@ gym.register(
 )
 
 ##
-# H100-Optimized Environment
-##
-
-gym.register(
-    id="RobotLab-Isaac-Velocity-Jump-Booster-T1-H100-v0",
-    entry_point="isaaclab.envs:ManagerBasedRLEnv",
-    disable_env_checker=True,
-    kwargs={
-        "env_cfg_entry_point": f"{__name__}.jump_env_cfg:BoosterT1JumpEnvCfg_H100",
-        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:BoosterT1JumpPPORunnerCfg_H100",
-        "cusrl_cfg_entry_point": f"{agents.__name__}.cusrl_ppo_cfg:BoosterT1RoughTrainerCfg",
-    },
-)
-
-##
 # Keep original environments for reference (these use velocity-based control)
 ##
 
