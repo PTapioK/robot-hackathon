@@ -326,3 +326,9 @@ class BoosterT1JumpEnvCfg(LocomotionVelocityRoughEnvCfg):
         # ======================================================================================
         self.episode_length_s = 15.0  # Longer episodes for jump execution
         self.decimation = 4
+
+        # Patch buffer: minimum 328,828 required, setting to 11 * 2^15 = 360,448
+        self.sim.physx.gpu_max_rigid_patch_count = 11 * 2**15
+
+        # Collision stack: minimum 71,091,904 bytes required, setting to 80 MB for safety
+        self.sim.physx.gpu_collision_stack_size = 80 * 2**20
