@@ -151,7 +151,7 @@ class BoosterT1JumpEnvCfg(LocomotionVelocityRoughEnvCfg):
             weight=50.0,  # Main task reward (fires once per jump)
             params={
                 "command_name": "jump_target",
-                "success_radius": 0.5,  # Shaped reward within 50cm
+                "success_radius": 0.3,  # Shaped reward within 30cm (matches curriculum)
                 "sensor_cfg": SceneEntityCfg("contact_forces", body_names=[self.foot_link_name]),
                 "asset_cfg": SceneEntityCfg("robot"),
             },
