@@ -895,7 +895,7 @@ def pre_takeoff_ground_time(
     """Penalty for staying on ground before first takeoff.
 
     Encourages robot to jump quickly rather than walking.
-    Disabled in Stage 0 (0.3m jumps) to allow gentler learning start.
+    Applied in ALL stages (including Stage 0) to enforce jumping behavior.
 
     Args:
         env: The learning environment.
@@ -910,15 +910,9 @@ def pre_takeoff_ground_time(
     # Check if on ground
     contact_now = _any_foot_contact(env, sensor_cfg)
 
-    # Get current curriculum stage (Stage 0 = 0.3m beginner jumps, no penalty yet)
-    if hasattr(env, '_jump_current_stage_assignments'):
-        stage = env._jump_current_stage_assignments
-    else:
-        # Fallback: assume all in Stage 1+ if curriculum not initialized
-        stage = torch.ones(env.num_envs, dtype=torch.long, device=env.device)
-
-    # Penalty condition: on ground AND haven't taken off yet AND past Stage 0
-    cost = contact_now & (~bufs["took_off"]) & (stage > 0)
+    # Penalty condition: on ground AND haven't taken off yet (ALL STAGES)
+    # This forces the robot to jump rather than walk toward the target
+    cost = contact_now & (~bufs["took_off"])
 
     return cost.float()
 

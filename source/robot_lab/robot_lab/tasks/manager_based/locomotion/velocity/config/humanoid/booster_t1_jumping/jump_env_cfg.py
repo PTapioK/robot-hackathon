@@ -167,10 +167,10 @@ class BoosterT1JumpEnvCfg(LocomotionVelocityRoughEnvCfg):
             },
         )
 
-        # 3. ANTI-WALKING: Penalize ground contact before takeoff (Stage 1+ only)
+        # 3. ANTI-WALKING: Penalize ground contact before takeoff (ALL stages)
         self.rewards.pre_takeoff_ground_time = RewTerm(
             func=mdp.pre_takeoff_ground_time,
-            weight=-2.0,  # Penalty for staying on ground (not applied in Stage 0)
+            weight=-2.0,  # Penalty for staying on ground (applied in all stages)
             params={
                 "sensor_cfg": SceneEntityCfg("contact_forces", body_names=[self.foot_link_name]),
                 "command_name": "jump_target",
