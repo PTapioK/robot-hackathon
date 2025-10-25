@@ -159,6 +159,9 @@ class JumpTargetCommand(CommandTerm):
         # Obtain the robot asset
         self.robot: Articulation = env.scene[cfg.asset_name]
 
+        # Store reference to terrain for ground height queries
+        self.terrain = env.scene.terrain if hasattr(env.scene, "terrain") else None
+
         # Create buffers to store the command
         # -- target position in world frame: (x, y, z)
         self.target_pos_w = torch.zeros(self.num_envs, 3, device=self.device)
@@ -166,8 +169,14 @@ class JumpTargetCommand(CommandTerm):
         self.target_pos_b = torch.zeros_like(self.target_pos_w)
         # -- distance from robot to target (horizontal)
         self.target_distance = torch.zeros(self.num_envs, device=self.device)
-        # -- ground reference height for each environment (to prevent spawning in air)
-        self.ground_height = torch.zeros(self.num_envs, device=self.device)
+
+        # Get ground reference height from terrain environment origins
+        # This is the actual terrain height where robots spawn, not the robot's trunk height
+        if self.terrain is not None and hasattr(self.terrain, "env_origins"):
+            self.ground_height = self.terrain.env_origins[:, 2].clone()
+        else:
+            # Fallback: assume flat ground at z=0
+            self.ground_height = torch.zeros(self.num_envs, device=self.device)
 
         # Initialize curriculum ranges (can be updated by curriculum function)
         self.horizontal_range = torch.tensor(cfg.horizontal_range, device=self.device)
@@ -214,30 +223,28 @@ class JumpTargetCommand(CommandTerm):
         # Get current robot positions for the resampling environments
         robot_pos_w = self.robot.data.root_pos_w[env_ids].clone()
 
-        # Update ground reference height (robot's current Z when on ground)
-        # This prevents targets from spawning in the air
-        self.ground_height[env_ids] = robot_pos_w[:, 2]
-
         # Sample random angles for target direction (full 360 degrees)
-        r = torch.empty(len(env_ids), device=self.device)
-        theta = r.uniform_(-torch.pi, torch.pi)
+        theta = torch.empty(len(env_ids), device=self.device).uniform_(-torch.pi, torch.pi)
 
         # Sample horizontal distance from curriculum range
+        horizontal_dist = torch.empty(len(env_ids), device=self.device).uniform_(
+            self.horizontal_range[0], self.horizontal_range[1]
+        )
         # Ensure minimum distance to prevent spawning inside humanoid
         min_distance = 0.5  # Minimum 0.5m to avoid spawning inside robot
-        horizontal_dist = r.uniform_(
-            max(self.horizontal_range[0], min_distance),
-            max(self.horizontal_range[1], min_distance)
-        )
+        horizontal_dist = torch.clamp(horizontal_dist, min=min_distance)
 
         # Sample height from curriculum range
-        target_height = r.uniform_(self.height_range[0], self.height_range[1])
+        target_height = torch.empty(len(env_ids), device=self.device).uniform_(
+            self.height_range[0], self.height_range[1]
+        )
 
         # Calculate target position in world frame
         self.target_pos_w[env_ids, 0] = robot_pos_w[:, 0] + horizontal_dist * torch.cos(theta)
         self.target_pos_w[env_ids, 1] = robot_pos_w[:, 1] + horizontal_dist * torch.sin(theta)
-        # Use ground reference height instead of current robot Z (which could be mid-air)
-        self.target_pos_w[env_ids, 2] = self.ground_height[env_ids] + target_height
+        # Use terrain ground reference height, not robot trunk height
+        # Add small offset (0.05m) to ensure target is visible above terrain surface
+        self.target_pos_w[env_ids, 2] = self.ground_height[env_ids] + target_height + 0.05
 
         # Store horizontal distance for metrics
         self.target_distance[env_ids] = horizontal_dist
