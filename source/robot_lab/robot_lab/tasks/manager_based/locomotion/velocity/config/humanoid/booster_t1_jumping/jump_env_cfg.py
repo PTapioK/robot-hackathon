@@ -136,23 +136,52 @@ class BoosterT1JumpEnvCfg(LocomotionVelocityRoughEnvCfg):
         # Rewards Configuration
         # ======================================================================================
 
-        # --- MINIMAL JUMP REWARDS (Optimized for performance) ---
-        # Key: Compute expensive checks ONLY at episode boundaries, not every step
+        # --- OPTIMIZED JUMP REWARDS (Balanced performance ~150K steps/s) ---
+        # Key rewards for landing accuracy, dual-foot mechanics, and stability
 
-        # Simple distance reward (computed from robot position - no sensor queries!)
+        # 1. Landing Accuracy - Large reward for landing near target
+        self.rewards.reach_target_zone = RewTerm(
+            func=mdp.reach_target_zone,
+            weight=50.0,  # Main task reward
+            params={
+                "command_name": "jump_target",
+                "tolerance": 0.5,
+                "sensor_cfg": SceneEntityCfg("contact_forces", body_names=[self.foot_link_name]),
+            },
+        )
+
+        # 2. Approach Target - Continuous reward for reducing distance
         self.rewards.approach_target = RewTerm(
-            func=mdp.target_progress,  # Uses simple position difference
-            weight=1.0,
+            func=mdp.target_progress,
+            weight=2.0,  # Increased from 1.0 for stronger guidance
             params={"command_name": "jump_target", "std": 1.0},
         )
 
-        # Disable ALL contact sensor-based rewards (these query sensors every step - VERY expensive!)
+        # 3. Dual-Foot Landing - Encourage landing with both feet
+        self.rewards.dual_foot_landing = RewTerm(
+            func=mdp.dual_foot_landing,
+            weight=10.0,
+            params={
+                "sensor_cfg": SceneEntityCfg("contact_forces", body_names=[self.foot_link_name]),
+                "time_window": 0.2,
+            },
+        )
+
+        # 4. Landing Stability - Reward upright landing without tumbling
+        self.rewards.landing_stability = RewTerm(
+            func=mdp.landing_stability,
+            weight=8.0,
+            params={
+                "sensor_cfg": SceneEntityCfg("contact_forces", body_names=[self.foot_link_name]),
+                "asset_cfg": SceneEntityCfg("robot"),
+            },
+        )
+
+        # Disable less critical rewards (keep overhead low)
         self.rewards.flight_phase_quality = None
-        self.rewards.landing_stability = None
         self.rewards.smooth_flight_trajectory = None
-        self.rewards.landing_orientation = None
+        self.rewards.landing_orientation = None  # Covered by landing_stability
         self.rewards.dual_foot_takeoff = None
-        self.rewards.dual_foot_landing = None
 
         # --- MODIFIED REWARDS (Reduced penalties for jumping) ---
 

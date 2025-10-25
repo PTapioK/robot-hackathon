@@ -152,7 +152,6 @@ def jump_target_curriculum(
         env._jump_curriculum_level = 0  # Current highest unlocked stage
         env._jump_current_stage_assignments = torch.zeros(env.num_envs, dtype=torch.int32, device=env.device)
         env._jump_evaluation_cycle = 0
-        env._jump_iteration_counter = 0
 
         # Simplified tracking: accumulate successes per stage (no rolling buffer)
         env._jump_stage_successes = torch.zeros(len(CURRICULUM_STAGES), device=env.device)
@@ -172,26 +171,58 @@ def jump_target_curriculum(
         env._jump_success_threshold = success_threshold
         env._jump_regression_threshold = regression_threshold
 
-    # Update success tracking at episode boundaries (FULLY VECTORIZED - minimal overhead)
-    if len(env_ids) > 0 and env.common_step_counter % env.max_episode_length == 0:
-        # Get success metrics from the reward manager
-        episode_sums = env.reward_manager._episode_sums[reward_term_name]
+        # Logging: Track episodes
+        env._jump_total_episodes = 0
+
+    # Update success tracking whenever environments reset
+    if len(env_ids) > 0:
+        # Get actual success metric from jump command manager (0.0 or 1.0 per env)
+        # This is already computed: distance_to_target < success_radius
+        jump_command = env.command_manager._terms[command_term_name]
+        successes = jump_command.metrics["success_rate"][env_ids]  # [len(env_ids)]
 
         # Get stage indices for all resetting environments
         stage_indices = env._jump_current_stage_assignments[env_ids]  # [len(env_ids)]
-
-        # Calculate successes for all environments at once (0.0 or 1.0)
-        rewards = episode_sums[env_ids]  # [len(env_ids)]
-        successes = (rewards / env.max_episode_length_s).float()  # [len(env_ids)]
 
         # Update success tracking (FULLY VECTORIZED using scatter_add - stays on GPU, no loops!)
         env._jump_stage_successes.scatter_add_(0, stage_indices.long(), successes)
         env._jump_stage_total.scatter_add_(0, stage_indices.long(), torch.ones_like(successes))
 
-        env._jump_iteration_counter += 1
+        # Track total episodes for logging (only actual resets, not every call)
+        env._jump_total_episodes += len(env_ids)
 
-    # Evaluate curriculum every 50 iterations (REDUCED FREQUENCY for less Python overhead)
-    if env._jump_iteration_counter > 0 and env._jump_iteration_counter % 50 == 0:
+    # Increment call counter for logging
+    if not hasattr(env, '_jump_call_counter'):
+        env._jump_call_counter = 0
+    env._jump_call_counter += 1
+
+    # Progress logging every 100 curriculum calls (roughly every few training iterations)
+    # With 16K envs, curriculum is called very frequently, so we need a higher threshold
+    if env._jump_call_counter % 100 == 0:
+        num_unlocked_stages = env._jump_curriculum_level + 1
+
+        # Calculate current success rate across all unlocked stages
+        if torch.min(env._jump_stage_total[:num_unlocked_stages]) >= 1:
+            stage_success_rates = env._jump_stage_successes[:num_unlocked_stages] / (env._jump_stage_total[:num_unlocked_stages] + 1e-8)
+            overall_success = torch.mean(stage_success_rates).item()
+
+            # Check if we have enough data for evaluation (10 episodes per stage minimum)
+            min_episodes_per_stage = int(torch.min(env._jump_stage_total[:num_unlocked_stages]).item())
+            min_needed = 10
+
+            # Get current and next stage names
+            current_stage = env._jump_curriculum_level
+            next_stage = min(current_stage + 1, len(CURRICULUM_STAGES) - 1)
+
+            # Data readiness indicator
+            data_ready = "✓" if min_episodes_per_stage >= min_needed else f"{min_episodes_per_stage}/{min_needed}"
+
+            print(f"\n[Curriculum] Stage {current_stage} → {next_stage} | "
+                  f"Success: {overall_success:.1%} (need {success_threshold:.0%}) | "
+                  f"Data: {data_ready}")
+
+    # Evaluate curriculum every 500 calls (balanced frequency for 16K envs)
+    if env._jump_call_counter % 500 == 0:
         num_unlocked_stages = env._jump_curriculum_level + 1
 
         # Check if we have enough data (at least 10 rollouts per unlocked stage)
@@ -203,20 +234,54 @@ def jump_target_curriculum(
             # Overall success rate is average across all unlocked stages
             overall_success_rate = torch.mean(stage_success_rates).item()  # ONE sync point
 
+            # Print detailed statistics before making decision
+            print(f"\n{'='*70}")
+            print(f"[Curriculum Evaluation]")
+            print(f"{'='*70}")
+
+            # Per-stage breakdown
+            for i in range(num_unlocked_stages):
+                total_eps = int(env._jump_stage_total[i].item())
+                successful_eps = int(env._jump_stage_successes[i].item())
+                success_rate = stage_success_rates[i].item()
+
+                h_range = CURRICULUM_STAGES[i]['horizontal_range']
+                z_range = CURRICULUM_STAGES[i]['height_range']
+
+                # Format stage description
+                if h_range[0] == 0 and h_range[1] == 0:
+                    stage_desc = "Standing (0m)"
+                else:
+                    stage_desc = f"{h_range[0]:.1f}-{h_range[1]:.1f}m, ±{z_range[1]:.2f}m"
+
+                status = "✓" if i <= env._jump_curriculum_level else " "
+                current_marker = " ← CURRENT" if i == env._jump_curriculum_level else ""
+
+                print(f"  [{status}] Stage {i}: {stage_desc:20s} | "
+                      f"{successful_eps:6d}/{total_eps:6d} = {success_rate:5.1%}{current_marker}")
+
+            print(f"\n  Overall Success: {overall_success_rate:.1%} (need {success_threshold:.0%} to advance)")
+
             # Progression/regression logic (minimal Python-side logic)
             if overall_success_rate > success_threshold and env._jump_curriculum_level < len(CURRICULUM_STAGES) - 1:
                 env._jump_curriculum_level += 1
                 # Reset counters when advancing
                 env._jump_stage_successes.zero_()
                 env._jump_stage_total.zero_()
-                print(f"[Curriculum] → Stage {env._jump_curriculum_level} | Success: {overall_success_rate:.1%}")
+
+                h_range = CURRICULUM_STAGES[env._jump_curriculum_level]['horizontal_range']
+                print(f"\n  🎯 ADVANCING TO STAGE {env._jump_curriculum_level} ({h_range[0]:.1f}-{h_range[1]:.1f}m jumps)!")
 
             elif overall_success_rate <= regression_threshold and env._jump_curriculum_level > 0:
                 env._jump_curriculum_level -= 1
                 # Reset counters when regressing
                 env._jump_stage_successes.zero_()
                 env._jump_stage_total.zero_()
-                print(f"[Curriculum] ← Stage {env._jump_curriculum_level} | Success: {overall_success_rate:.1%}")
+                print(f"\n  ⚠️  REGRESSING TO STAGE {env._jump_curriculum_level}")
+            else:
+                print(f"\n  → Continuing Stage {env._jump_curriculum_level} (need {success_threshold:.0%} success)")
+
+            print(f"{'='*70}\n")
 
             env._jump_evaluation_cycle += 1
 
