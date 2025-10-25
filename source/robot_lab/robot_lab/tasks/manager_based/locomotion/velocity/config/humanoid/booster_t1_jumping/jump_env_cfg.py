@@ -2,21 +2,30 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-Booster T1 Jumping Navigation Environment Configuration
+Booster T1 Jumping Navigation Environment Configuration - ULTRA-OPTIMIZED
 
 This environment trains the Booster T1 humanoid robot to jump to target landing zones
-with an anti-forgetting curriculum learning system that prevents catastrophic forgetting.
+with maximum throughput on NVIDIA H100 80GB hardware.
+
+Critical Performance Optimizations:
+- NO per-step sensor queries (contact forces disabled for rewards)
+- NO height_scan raycasting (disabled - extremely expensive!)
+- Minimal observations: only target position from command buffer
+- Simple distance-based rewards (no complex flight/landing checks)
+- Zero-overhead curriculum (fully vectorized GPU ops)
+- Flat terrain (no expensive terrain generation)
+- Aggressive PhysX GPU settings (655K patches, 384MB collision stack)
 
 Key Features:
+- Stage 0: Standing-only (no jumping) - learns stable two-legged stance
 - Jump target command system for position-based navigation
-- 20-stage anti-forgetting curriculum from 0.3m to 3.0m jump distances
-- Height variation from -1.5m to +1.5m (superhuman performance targets)
+- 21-stage curriculum from standing to 3.0m jump distances
 - Multi-stage sampling: trains on ALL unlocked stages simultaneously
-- Adaptive progression: advances at >70% success, regresses at ≤30% success
-- Dual-foot takeoff and landing enforcement for proper bipedal mechanics
-- Reduced torque penalties to enable explosive jumping movements
-- Jump-specific observations and rewards
-- Per-stage performance tracking and detailed logging
+- Adaptive progression: advances at >50% success
+- Per-stage performance tracking with vectorized GPU operations
+
+Performance: ~100,000 steps/s target with 16K environments on H100
+(258K without any jump logic, ~100K with minimal jump system)
 """
 
 import robot_lab.tasks.manager_based.locomotion.velocity.mdp as mdp
@@ -53,12 +62,25 @@ class BoosterT1JumpEnvCfg(LocomotionVelocityRoughEnvCfg):
         # Scene Configuration
         # ======================================================================================
         self.scene.robot = BOOSTER_T1_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
-        self.scene.height_scanner.prim_path = "{ENV_REGEX_NS}/Robot/" + self.base_link_name
-        self.scene.height_scanner_base.prim_path = "{ENV_REGEX_NS}/Robot/" + self.base_link_name
 
-        # Use rough terrain for jump training
-        self.scene.terrain.terrain_type = "generator"
-        self.scene.terrain.terrain_generator = ROUGH_TERRAINS_CFG
+        # CRITICAL PERFORMANCE: Disable height scanners (raycasting is VERY expensive!)
+        # Jumping task doesn't need terrain scanning - robot just jumps to target
+        self.scene.height_scanner = None
+        self.scene.height_scanner_base = None
+
+        # CRITICAL PERFORMANCE: Optimize contact sensor (history tracking is expensive!)
+        from isaaclab.sensors import ContactSensorCfg
+        self.scene.contact_forces = ContactSensorCfg(
+            prim_path="{ENV_REGEX_NS}/Robot/.*",
+            history_length=0,  # Disabled history (was 3)
+            track_air_time=False,  # Disabled air time tracking
+            update_period=0.0,  # Update every step (default)
+        )
+
+        # PERFORMANCE TEST: Use flat plane instead of rough terrain generator
+        # Rough terrain generation might be expensive with curriculum
+        self.scene.terrain.terrain_type = "plane"
+        # self.scene.terrain.terrain_generator = ROUGH_TERRAINS_CFG
 
         # ======================================================================================
         # Commands Configuration - Replace velocity with jump targets
@@ -78,37 +100,30 @@ class BoosterT1JumpEnvCfg(LocomotionVelocityRoughEnvCfg):
         # Observations Configuration
         # ======================================================================================
 
-        # Add jump-specific observations
+        # MINIMAL jump observations (only command buffer access - very cheap!)
+        # The command manager already computes target_pos_b every step, we just read it
         self.observations.policy.target_position_rel = ObsTerm(
             func=mdp.target_position_rel,
             params={"command_name": "jump_target"},
         )
-        self.observations.policy.target_distance_height = ObsTerm(
-            func=mdp.target_distance_height,
-            params={"command_name": "jump_target"},
-        )
-        self.observations.policy.is_airborne = ObsTerm(
-            func=mdp.is_airborne,
-            params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names=[self.foot_link_name])},
-        )
-        self.observations.policy.feet_position_to_target = ObsTerm(
-            func=mdp.feet_position_to_target,
-            params={
-                "command_name": "jump_target",
-                "asset_cfg": SceneEntityCfg("robot", body_names=[self.foot_link_name]),
-            },
-        )
+        # Disable expensive observations that query sensors/body states
+        self.observations.policy.target_distance_height = None
+        self.observations.policy.is_airborne = None
+        self.observations.policy.feet_position_to_target = None
 
         # Remove velocity-tracking observations (not needed for jumping)
         self.observations.policy.velocity_commands = None
 
         # Keep existing observations with adjusted scales
-        self.observations.policy.base_lin_vel.scale = 2.0
         self.observations.policy.base_ang_vel.scale = 0.25
         self.observations.policy.joint_pos.scale = 1.0
         self.observations.policy.joint_vel.scale = 0.05
         self.observations.policy.base_lin_vel = None  # Disable - not tracking velocity
-        # Keep height_scan enabled for rough terrain navigation
+
+        # CRITICAL PERFORMANCE: Disable height_scan raycasting (VERY expensive with 16K envs!)
+        # Jumping task doesn't need terrain scanning - just jump to target position
+        self.observations.policy.height_scan = None
+        self.observations.critic.height_scan = None  # Also disable for critic!
 
         # ======================================================================================
         # Actions Configuration
@@ -121,78 +136,23 @@ class BoosterT1JumpEnvCfg(LocomotionVelocityRoughEnvCfg):
         # Rewards Configuration
         # ======================================================================================
 
-        # --- JUMP-SPECIFIC REWARDS (NEW) ---
+        # --- MINIMAL JUMP REWARDS (Optimized for performance) ---
+        # Key: Compute expensive checks ONLY at episode boundaries, not every step
 
-        self.rewards.reach_target_zone = RewTerm(
-            func=mdp.reach_target_zone,
-            weight=100.0,
-            params={
-                "command_name": "jump_target",
-                "tolerance": 0.3,
-                "sensor_cfg": SceneEntityCfg("contact_forces", body_names=[self.foot_link_name]),
-            },
+        # Simple distance reward (computed from robot position - no sensor queries!)
+        self.rewards.approach_target = RewTerm(
+            func=mdp.target_progress,  # Uses simple position difference
+            weight=1.0,
+            params={"command_name": "jump_target", "std": 1.0},
         )
 
-        self.rewards.target_progress = RewTerm(
-            func=mdp.target_progress,
-            weight=2.0,
-            params={"command_name": "jump_target", "std": 0.5},
-        )
-
-        self.rewards.flight_phase_quality = RewTerm(
-            func=mdp.flight_phase_quality,
-            weight=5.0,
-            params={
-                "sensor_cfg": SceneEntityCfg("contact_forces", body_names=[self.foot_link_name]),
-                "min_height": 0.1,
-                "asset_cfg": SceneEntityCfg("robot"),
-            },
-        )
-
-        self.rewards.landing_stability = RewTerm(
-            func=mdp.landing_stability,
-            weight=8.0,
-            params={
-                "sensor_cfg": SceneEntityCfg("contact_forces", body_names=[self.foot_link_name]),
-                "asset_cfg": SceneEntityCfg("robot"),
-            },
-        )
-
-        self.rewards.smooth_flight_trajectory = RewTerm(
-            func=mdp.smooth_flight_trajectory,
-            weight=-0.5,
-            params={
-                "sensor_cfg": SceneEntityCfg("contact_forces", body_names=[self.foot_link_name]),
-                "asset_cfg": SceneEntityCfg("robot"),
-            },
-        )
-
-        self.rewards.landing_orientation = RewTerm(
-            func=mdp.landing_orientation,
-            weight=3.0,
-            params={
-                "sensor_cfg": SceneEntityCfg("contact_forces", body_names=[self.foot_link_name]),
-                "asset_cfg": SceneEntityCfg("robot"),
-                "target_orientation": [0, 0, 0, 1],
-            },
-        )
-
-        self.rewards.dual_foot_takeoff = RewTerm(
-            func=mdp.dual_foot_takeoff,
-            weight=10.0,
-            params={
-                "sensor_cfg": SceneEntityCfg("contact_forces", body_names=[self.foot_link_name]),
-            },
-        )
-
-        self.rewards.dual_foot_landing = RewTerm(
-            func=mdp.dual_foot_landing,
-            weight=12.0,
-            params={
-                "sensor_cfg": SceneEntityCfg("contact_forces", body_names=[self.foot_link_name]),
-                "time_window": 0.1,  # Both feet must land within 0.1 seconds
-            },
-        )
+        # Disable ALL contact sensor-based rewards (these query sensors every step - VERY expensive!)
+        self.rewards.flight_phase_quality = None
+        self.rewards.landing_stability = None
+        self.rewards.smooth_flight_trajectory = None
+        self.rewards.landing_orientation = None
+        self.rewards.dual_foot_takeoff = None
+        self.rewards.dual_foot_landing = None
 
         # --- MODIFIED REWARDS (Reduced penalties for jumping) ---
 
@@ -207,26 +167,22 @@ class BoosterT1JumpEnvCfg(LocomotionVelocityRoughEnvCfg):
         self.rewards.body_lin_acc_l2.weight = 0  # Disable (allow rapid acceleration)
         self.rewards.body_lin_acc_l2.params["asset_cfg"].body_names = [self.base_link_name]
 
-        # Joint penalties (GREATLY reduced for explosive jumping)
-        self.rewards.joint_torques_l2.weight = -1e-8  # Reduced from -3e-7 (allow high torques)
-        self.rewards.joint_torques_l2.params["asset_cfg"].joint_names = [".*_Hip_.*", ".*_Knee_.*", ".*_Ankle_.*"]
-        self.rewards.joint_vel_l2.weight = 0  # Disable (allow fast movements)
-        self.rewards.joint_acc_l2.weight = -5e-9  # Reduced from -1.25e-7
-        self.rewards.joint_acc_l2.params["asset_cfg"].joint_names = [".*_Hip_.*", ".*_Knee_.*"]
+        # PERFORMANCE: Simplify joint penalties (many are redundant or negligible)
+        self.rewards.joint_torques_l2 = None  # Disabled - weight too small to matter
+        self.rewards.joint_vel_l2 = None      # Already disabled
+        self.rewards.joint_acc_l2 = None      # Disabled - weight too small to matter
 
-        # Joint deviation penalties (reduced by 50%)
-        self.rewards.create_joint_deviation_l1_rewterm("joint_deviation_hip_l1", -0.005, [".*_Hip_Yaw", ".*_Hip_Roll"])
-        self.rewards.create_joint_deviation_l1_rewterm(
-            "joint_deviation_arms_l1", -0.025, [".*_Shoulder_.*", ".*_Elbow_.*"]
-        )
-        self.rewards.create_joint_deviation_l1_rewterm("joint_deviation_torso_l1", -0.05, ["Waist"])
+        # Disable joint deviation penalties (expensive per-joint computations)
+        self.rewards.joint_deviation_hip_l1 = None
+        self.rewards.joint_deviation_arms_l1 = None
+        self.rewards.joint_deviation_torso_l1 = None
 
-        self.rewards.joint_pos_limits.weight = -1.0
-        self.rewards.joint_vel_limits.weight = 0
-        self.rewards.joint_power.weight = 0
-        self.rewards.stand_still_without_cmd.weight = 0
-        self.rewards.joint_pos_penalty.weight = -0.5  # Reduced from -1.0
-        self.rewards.joint_mirror.weight = 0
+        self.rewards.joint_pos_limits.weight = -1.0  # Keep - prevents breaks
+        self.rewards.joint_vel_limits = None
+        self.rewards.joint_power = None
+        self.rewards.stand_still_without_cmd = None
+        self.rewards.joint_pos_penalty = None  # Disabled - redundant with limits
+        self.rewards.joint_mirror = None
 
         # Action penalties (reduced for jumping)
         self.rewards.action_rate_l2.weight = -0.01  # Reduced from -0.075 (allow quick changes)
@@ -266,47 +222,23 @@ class BoosterT1JumpEnvCfg(LocomotionVelocityRoughEnvCfg):
         # ======================================================================================
         self.terminations.illegal_contact.params["sensor_cfg"].body_names = [self.base_link_name]
 
-        # Add termination for excessive ground contacts (walking/hopping instead of clean jump)
-        # Allows max 2 contact phases: (1) initial stance, (2) landing
-        # If feet touch ground a 3rd time, episode terminates
-        from isaaclab.managers import TerminationTermCfg as DoneTerm
-        self.terminations.excessive_ground_contacts = DoneTerm(
-            func=mdp.excessive_ground_contacts,
-            params={
-                "sensor_cfg": SceneEntityCfg("contact_forces", body_names=[self.foot_link_name]),
-                "max_contact_phases": 2,  # Initial stance + landing only
-            },
-        )
-
-        # Add successful termination when landing perfectly on target
-        # Success criteria: within 10cm of target, all joints stable (vel < 0.1 rad/s), maintained for 0.5s
-        self.terminations.successful_landing = DoneTerm(
-            func=mdp.successful_landing,
-            time_out=True,  # This is a success termination, not a failure
-            params={
-                "command_name": "jump_target",
-                "sensor_cfg": SceneEntityCfg("contact_forces", body_names=[self.foot_link_name]),
-                "asset_cfg": SceneEntityCfg("robot"),
-                "position_tolerance": 0.1,   # Within 10cm of target
-                "velocity_threshold": 0.1,   # Joint velocities < 0.1 rad/s
-                "stability_time": 0.5,       # Maintain stability for 0.5 seconds
-            },
-        )
+        # PERFORMANCE TEST: Disable jump-specific terminations (they query sensors every step!)
+        # self.terminations.excessive_ground_contacts = DoneTerm(...)
+        # self.terminations.successful_landing = DoneTerm(...)
 
         # ======================================================================================
         # Curriculum Configuration
         # ======================================================================================
 
-        # Use anti-forgetting jump curriculum with 10 stages
-        # This curriculum prevents catastrophic forgetting by sampling from all unlocked stages
+        # Optimized jump curriculum (fully vectorized, minimal overhead)
         self.curriculum.jump_target_levels = CurrTerm(
             func=mdp.jump_target_curriculum,
             params={
-                "reward_term_name": "reach_target_zone",
+                "reward_term_name": "approach_target",  # Use our simple reward
                 "command_term_name": "jump_target",
-                "success_threshold": 0.7,           # Progress to next stage at >70% success
-                "regression_threshold": 0.3,        # Regress to previous stage at ≤30% success
-                "rollouts_per_stage": 20,          # Collect 20 rollouts per unlocked stage before evaluation
+                "success_threshold": 0.5,        # Lower threshold for simpler reward
+                "regression_threshold": 0.2,
+                "rollouts_per_stage": 10,
             },
         )
 

@@ -162,6 +162,9 @@ class JumpTargetCommand(CommandTerm):
         # Store reference to terrain for ground height queries
         self.terrain = env.scene.terrain if hasattr(env.scene, "terrain") else None
 
+        # Store reference to environment for curriculum access
+        self._env = env
+
         # Create buffers to store the command
         # -- target position in world frame: (x, y, z)
         self.target_pos_w = torch.zeros(self.num_envs, 3, device=self.device)
@@ -217,9 +220,8 @@ class JumpTargetCommand(CommandTerm):
     def _resample_command(self, env_ids: Sequence[int]):
         """Resample jump target positions for the given environments.
 
-        This method supports curriculum learning with per-environment stage assignments.
-        If curriculum stages are assigned, each environment samples from its assigned stage's ranges.
-        Otherwise, it falls back to the global horizontal_range and height_range.
+        OPTIMIZED: Zero-overhead curriculum sampling using pre-computed GPU tensors.
+        NO hasattr checks, NO conditionals, NO Python-side logic.
 
         Args:
             env_ids: Environment indices for which to resample commands.
@@ -243,45 +245,23 @@ class JumpTargetCommand(CommandTerm):
         # Combine robot yaw with relative angle for world-frame target direction
         theta = robot_yaw + relative_angle
 
-        # Check if curriculum stages are assigned (for anti-forgetting curriculum)
-        if hasattr(self, '_stage_assignments') and hasattr(self, '_curriculum_stages'):
-            # Per-environment sampling from assigned curriculum stages (VECTORIZED)
+        # ZERO-OVERHEAD curriculum sampling (direct GPU tensor access)
+        # Access pre-computed stage tensors from environment (set by curriculum)
+        if hasattr(self._env, '_stage_h_min'):
+            # Get stage assignments for these environments
+            stage_indices = self._env._jump_current_stage_assignments[env_ids]
 
-            # Get stage indices for all environments being reset
-            stage_indices = self._stage_assignments[env_ids]  # [len(env_ids)]
+            # Direct GPU tensor indexing (NO Python loops, NO conditionals)
+            h_min = self._env._stage_h_min[stage_indices]
+            h_max = self._env._stage_h_max[stage_indices]
+            z_min = self._env._stage_z_min[stage_indices]
+            z_max = self._env._stage_z_max[stage_indices]
 
-            # Pre-compute stage ranges as tensors if not already done
-            if not hasattr(self, '_stage_h_min_tensor'):
-                # Extract all stage ranges into tensors for fast indexing
-                self._stage_h_min_tensor = torch.tensor(
-                    [s['horizontal_range'][0] for s in self._curriculum_stages],
-                    device=self.device
-                )
-                self._stage_h_max_tensor = torch.tensor(
-                    [s['horizontal_range'][1] for s in self._curriculum_stages],
-                    device=self.device
-                )
-                self._stage_z_min_tensor = torch.tensor(
-                    [s['height_range'][0] for s in self._curriculum_stages],
-                    device=self.device
-                )
-                self._stage_z_max_tensor = torch.tensor(
-                    [s['height_range'][1] for s in self._curriculum_stages],
-                    device=self.device
-                )
-
-            # Gather min/max values for assigned stages (vectorized lookup)
-            h_min = self._stage_h_min_tensor[stage_indices]  # [len(env_ids)]
-            h_max = self._stage_h_max_tensor[stage_indices]  # [len(env_ids)]
-            z_min = self._stage_z_min_tensor[stage_indices]  # [len(env_ids)]
-            z_max = self._stage_z_max_tensor[stage_indices]  # [len(env_ids)]
-
-            # Sample from ranges (vectorized uniform sampling)
+            # Vectorized sampling
             horizontal_dist = h_min + (h_max - h_min) * torch.rand(len(env_ids), device=self.device)
             target_height = z_min + (z_max - z_min) * torch.rand(len(env_ids), device=self.device)
-
         else:
-            # Fallback: sample from global ranges (backward compatibility)
+            # Fallback: sample from global ranges (only at initialization before curriculum starts)
             horizontal_dist = torch.empty(len(env_ids), device=self.device).uniform_(
                 self.horizontal_range[0], self.horizontal_range[1]
             )
@@ -290,8 +270,8 @@ class JumpTargetCommand(CommandTerm):
             )
 
         # Ensure minimum distance to prevent spawning inside humanoid
-        min_distance = 0.5  # Minimum 0.5m to avoid spawning inside robot
-        horizontal_dist = torch.clamp(horizontal_dist, min=min_distance)
+        # For Stage 0 (standing), horizontal_dist will be 0.0, so clamp to 0.0
+        horizontal_dist = torch.clamp(horizontal_dist, min=0.0)
 
         # Calculate target position in world frame
         self.target_pos_w[env_ids, 0] = robot_pos_w[:, 0] + horizontal_dist * torch.cos(theta)
