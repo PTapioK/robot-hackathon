@@ -1,6 +1,15 @@
 # Robotics-hackaton-submission
 Robot that jumps to a predefined marker, trained with curriculum learning with different stages.
 
+###Known issues and fix ideas:
+1) the model trained in the `logs/rsl_rl/booster_t1_rough/2025-10-26_11-25-09` directory is currently abusing our missed nuance in the environment.  
+To encourage double-legged jumps we're looking at the average foot placement from start position and the target marker position. And it's terminating
+ the episode if that middle coordinate is not there, and it's not airbourne. To fix this you'll need to either: encourage legs to be together.
+Track this for every leg, instead of taking the average, this will likely remove the split behavior.
+2) The hopping robot at `logs/rsl_rl/booster_t1_rough/hopping_robot_2025-10-26` won't work,
+first copy the *.pt* model and then checkout to 5e3795af186e7b9f3ed464dff8b09bb5594a4fb6,
+so the logic of the training and env resetting is same as it was trained. 
+
 ## running commands:
 **running training script**:  
 note change the num_envs to match your gpu size resources.
