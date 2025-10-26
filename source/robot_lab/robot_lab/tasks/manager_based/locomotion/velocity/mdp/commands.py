@@ -236,17 +236,17 @@ class JumpTargetCommand(CommandTerm):
         feet_pos = self.robot.data.body_pos_w[env_ids][:, foot_indices, :]  # [len(env_ids), num_feet, 3]
         self.start_pos_w[env_ids] = feet_pos.mean(dim=1)  # [len(env_ids), 3]
 
-        # Extract robot's current yaw angle from quaternion (x, y, z, w format)
+        # Extract robot's current yaw angle from quaternion (w, x, y, z format)
         robot_quat = self.robot.data.root_quat_w[env_ids]
         robot_yaw = torch.atan2(
-            2.0 * (robot_quat[:, 3] * robot_quat[:, 2] + robot_quat[:, 0] * robot_quat[:, 1]),
-            1.0 - 2.0 * (robot_quat[:, 1]**2 + robot_quat[:, 2]**2)
+            2.0 * (robot_quat[:, 0] * robot_quat[:, 3] + robot_quat[:, 1] * robot_quat[:, 2]),
+            1.0 - 2.0 * (robot_quat[:, 2]**2 + robot_quat[:, 3]**2)
         )
 
-        # Sample relative angle within ±40 degrees from robot's forward direction
+        # Sample relative angle within ±25 degrees from robot's forward direction
         relative_angle = torch.empty(len(env_ids), device=self.device).uniform_(
-            -0.6981,  # -40 degrees in radians
-            0.6981    # +40 degrees in radians
+            -0.4363,  # -25 degrees in radians
+            0.4363    # +25 degrees in radians
         )
 
         # Combine robot yaw with relative angle for world-frame target direction
