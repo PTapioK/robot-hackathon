@@ -1,7 +1,7 @@
 # Robotics-hackaton-submission
 Robot that jumps to a predefined marker, trained with curriculum learning with different stages.
 
-### Issues
+### Current Issues (updated at 26.10.2025)
 1) The model trained at `logs/rsl_rl/booster_t1_rough/2025-10-26_11-25-09` is exploiting a nuance we overlooked in the environment:
 To promote two-leg jumps, we use the average foot distance to the start and the target marker.
 The episode ends if `!is_airborne & distance_to_start_or_target_marker < THRESHOLD`. This however,
