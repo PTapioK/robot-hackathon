@@ -280,6 +280,18 @@ class BoosterT1JumpEnvCfg(LocomotionVelocityRoughEnvCfg):
         # Terminate if ANY body part touches ground EXCEPT feet
         self.terminations.illegal_contact.params["sensor_cfg"].body_names = [f"^(?!.*{self.foot_link_name}).*"]
 
+        # Enforce single-jump behavior: terminate if ground contact outside safe zones
+        from isaaclab.managers import TerminationTermCfg as DoneTerm
+        self.terminations.ground_contact_outside_safe_zones = DoneTerm(
+            func=mdp.ground_contact_outside_safe_zones,
+            params={
+                "command_name": "jump_target",
+                "sensor_cfg": SceneEntityCfg("contact_forces", body_names=[self.foot_link_name]),
+                "asset_cfg": SceneEntityCfg("robot"),
+                "tolerance": 0.2,  # 20cm safe zone radius around start and target
+            },
+        )
+
         # PERFORMANCE TEST: Disable jump-specific terminations (they query sensors every step!)
         # self.terminations.excessive_ground_contacts = DoneTerm(...)
         # self.terminations.successful_landing = DoneTerm(...)
@@ -336,7 +348,7 @@ class BoosterT1JumpEnvCfg(LocomotionVelocityRoughEnvCfg):
         # ======================================================================================
         # Episode Settings
         # ======================================================================================
-        self.episode_length_s = 3.0  # Quick 3-second episodes for jump execution
+        self.episode_length_s = 5.0  # 5-second episodes - forces quick jumps
         self.decimation = 4
 
         # ======================================================================================

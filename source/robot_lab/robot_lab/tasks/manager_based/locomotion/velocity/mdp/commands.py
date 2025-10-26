@@ -166,6 +166,8 @@ class JumpTargetCommand(CommandTerm):
         self._env = env
 
         # Create buffers to store the command
+        # -- start position (average feet location at takeoff): (x, y, z)
+        self.start_pos_w = torch.zeros(self.num_envs, 3, device=self.device)
         # -- target position in world frame: (x, y, z)
         self.target_pos_w = torch.zeros(self.num_envs, 3, device=self.device)
         # -- target position in robot base frame (updated each step)
@@ -228,6 +230,11 @@ class JumpTargetCommand(CommandTerm):
         """
         # Get current robot positions for the resampling environments
         robot_pos_w = self.robot.data.root_pos_w[env_ids].clone()
+
+        # Capture average feet position as start position (for safe-zone termination)
+        foot_indices, _ = self.robot.find_bodies(".*_foot_link")
+        feet_pos = self.robot.data.body_pos_w[env_ids][:, foot_indices, :]  # [len(env_ids), num_feet, 3]
+        self.start_pos_w[env_ids] = feet_pos.mean(dim=1)  # [len(env_ids), 3]
 
         # Extract robot's current yaw angle from quaternion (x, y, z, w format)
         robot_quat = self.robot.data.root_quat_w[env_ids]

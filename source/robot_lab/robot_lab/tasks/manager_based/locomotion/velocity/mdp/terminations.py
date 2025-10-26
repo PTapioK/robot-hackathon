@@ -150,3 +150,26 @@ def successful_landing(
     successful = env._success_stability_timer >= stability_time
 
     return successful
+
+
+def ground_contact_outside_safe_zones(
+    env: ManagerBasedRLEnv,
+    command_name: str = "jump_target",
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    tolerance: float = 0.2,
+) -> torch.Tensor:
+    """Terminate if ground contact outside start/target safe zones (enforces single-jump)."""
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    asset = env.scene[asset_cfg.name]
+    cmd = env.command_manager._terms[command_name]
+
+    # Any body touching ground?
+    any_contact = contact_sensor.data.net_forces_w_history[:, :, :, 2].max(dim=1)[0].max(dim=1)[0] > 1.0
+
+    # Current average feet position vs start/target
+    feet_avg = asset.data.body_pos_w[:, sensor_cfg.body_ids, :].mean(dim=1)
+    near_start = torch.norm(feet_avg - cmd.start_pos_w, dim=1) < tolerance
+    near_target = torch.norm(feet_avg - cmd.target_pos_w, dim=1) < tolerance
+
+    return any_contact & ~(near_start | near_target)
