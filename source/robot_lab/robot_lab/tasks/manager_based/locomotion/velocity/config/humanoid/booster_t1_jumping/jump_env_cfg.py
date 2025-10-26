@@ -98,7 +98,7 @@ class BoosterT1JumpEnvCfg(LocomotionVelocityRoughEnvCfg):
             debug_vis=True,  # Enable target visualization
             # Initial ranges (Stage 0) - will be dynamically updated by curriculum
             horizontal_range=(0.3, 0.4),  # Stage 0: very short jumps
-            height_range=(-0.03, 0.03),  # Stage 0: nearly level jumps
+            height_range=(0.0, 0.0),  # Stage 0: level jumps only (height variation removed)
             success_radius=0.3,  # 30cm tolerance for landing
         )
 

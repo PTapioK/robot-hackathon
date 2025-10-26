@@ -42,7 +42,7 @@ parser.add_argument(
 parser.add_argument("--real-time", action="store_true", default=False, help="Run in real-time, if possible.")
 parser.add_argument("--keyboard", action="store_true", default=False, help="Whether to use keyboard.")
 parser.add_argument("--jump_distance", type=float, default=None, help="Fixed horizontal jump distance in meters (e.g., 1.0)")
-parser.add_argument("--jump_height", type=float, default=None, help="Fixed jump height offset in meters (e.g., 0.0 for level)")
+parser.add_argument("--jump_height", type=float, default=None, help="[DEPRECATED] Jump height variation has been removed from training. This argument is ignored.")
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
@@ -121,10 +121,17 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         env_cfg.commands.jump_target.horizontal_range = (args_cli.jump_distance, args_cli.jump_distance)
         print(f"[Play] Fixed jump distance: {args_cli.jump_distance}m")
 
-    # Set fixed jump height if specified
+    # Deprecated: Height variation removed from curriculum
     if args_cli.jump_height is not None:
-        env_cfg.commands.jump_target.height_range = (args_cli.jump_height, args_cli.jump_height)
-        print(f"[Play] Fixed jump height: {args_cli.jump_height}m")
+        import warnings
+        warnings.warn(
+            "The --jump_height argument is deprecated and will be ignored. "
+            "Height variation has been removed from the jump curriculum. "
+            "All targets are now at ground level (height=0.0).",
+            DeprecationWarning,
+            stacklevel=2
+        )
+        print(f"[Play] WARNING: --jump_height is deprecated and ignored (height variation removed from training)")
 
     if args_cli.keyboard:
         env_cfg.scene.num_envs = 1
