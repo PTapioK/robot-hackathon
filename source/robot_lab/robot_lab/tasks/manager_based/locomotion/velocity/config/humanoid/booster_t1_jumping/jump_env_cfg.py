@@ -277,7 +277,8 @@ class BoosterT1JumpEnvCfg(LocomotionVelocityRoughEnvCfg):
         # ======================================================================================
         # Terminations Configuration
         # ======================================================================================
-        self.terminations.illegal_contact.params["sensor_cfg"].body_names = [self.base_link_name]
+        # Terminate if ANY body part touches ground EXCEPT feet
+        self.terminations.illegal_contact.params["sensor_cfg"].body_names = [f"^(?!.*{self.foot_link_name}).*"]
 
         # PERFORMANCE TEST: Disable jump-specific terminations (they query sensors every step!)
         # self.terminations.excessive_ground_contacts = DoneTerm(...)
@@ -335,7 +336,7 @@ class BoosterT1JumpEnvCfg(LocomotionVelocityRoughEnvCfg):
         # ======================================================================================
         # Episode Settings
         # ======================================================================================
-        self.episode_length_s = 15.0  # Longer episodes for jump execution
+        self.episode_length_s = 3.0  # Quick 3-second episodes for jump execution
         self.decimation = 4
 
         # ======================================================================================
