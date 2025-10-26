@@ -5,9 +5,9 @@ Robot that jumps to a predefined marker, trained with curriculum learning with d
 **running training script**:  
 note change the num_envs to match your gpu size resources.
 ```
-CUDA_DEVICE_MAX_CONNECTIONS=32 TORCH_CUDNN_V8_API_ENABLED=1 CUDA_LAUNCH_BLOCKING=0 \\
-PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True" \\
-python scripts/reinforcement_learning/rsl_rl/train.py --task RobotLab-Isaac-Velocity-Jump-Booster-T1-v0 --headless --num_envs 16384 \\
+CUDA_DEVICE_MAX_CONNECTIONS=32 TORCH_CUDNN_V8_API_ENABLED=1 CUDA_LAUNCH_BLOCKING=0 \
+PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True" \
+python scripts/reinforcement_learning/rsl_rl/train.py --task RobotLab-Isaac-Velocity-Jump-Booster-T1-v0 --headless --num_envs 16384 \
 ```
 
 **play script to check how the agent performs** :
