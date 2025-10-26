@@ -41,6 +41,8 @@ parser.add_argument(
 )
 parser.add_argument("--real-time", action="store_true", default=False, help="Run in real-time, if possible.")
 parser.add_argument("--keyboard", action="store_true", default=False, help="Whether to use keyboard.")
+parser.add_argument("--jump_distance", type=float, default=None, help="Fixed horizontal jump distance in meters (e.g., 1.0)")
+parser.add_argument("--jump_height", type=float, default=None, help="Fixed jump height offset in meters (e.g., 0.0 for level)")
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
@@ -112,6 +114,17 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     env_cfg.events.randomize_apply_external_force_torque = None
     env_cfg.events.push_robot = None
     env_cfg.curriculum.command_levels = None
+
+    # Set fixed jump distance if specified
+    if args_cli.jump_distance is not None:
+        env_cfg.curriculum.jump_target_levels = None
+        env_cfg.commands.jump_target.horizontal_range = (args_cli.jump_distance, args_cli.jump_distance)
+        print(f"[Play] Fixed jump distance: {args_cli.jump_distance}m")
+
+    # Set fixed jump height if specified
+    if args_cli.jump_height is not None:
+        env_cfg.commands.jump_target.height_range = (args_cli.jump_height, args_cli.jump_height)
+        print(f"[Play] Fixed jump height: {args_cli.jump_height}m")
 
     if args_cli.keyboard:
         env_cfg.scene.num_envs = 1
